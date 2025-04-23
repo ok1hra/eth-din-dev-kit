@@ -39,25 +39,31 @@ TODO
 - gpio to mqtt report
 - mqtt to gpio control
 - ds18b20 resolution to setup
+- change prn() to debug.. if usb connected
+- #define OTAWEB                      // enable upload firmware via web
+
+
+
 
 Changelog:
 - detect and read T1 and T2 termistor and public to MQTT every 20s
 
 IDE 1.8.19
-Použití knihovny WiFi ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/WiFi
-Použití knihovny EEPROM ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/EEPROM
-Použití knihovny WebServer ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/WebServer
-Použití knihovny Ethernet ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/Ethernet
-Použití knihovny ESPmDNS ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/ESPmDNS
-Použití knihovny ArduinoOTA ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/ArduinoOTA
-Použití knihovny Update ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/Update
-Použití knihovny AsyncTCP ve verzi 1.1.1 v adresáři: /home/dan/Arduino/libraries/AsyncTCP
-Použití knihovny ESPAsyncWebServer ve verzi 1.2.3 v adresáři: /home/dan/Arduino/libraries/ESPAsyncWebServer
-Použití knihovny FS ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/FS
-Použití knihovny AsyncElegantOTA ve verzi 2.2.7 v adresáři: /home/dan/Arduino/libraries/AsyncElegantOTA
-Použití knihovny PubSubClient ve verzi 2.8 v adresáři: /home/dan/Arduino/libraries/PubSubClient
-Použití knihovny Wire ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/Wire
-
+Using library OneWire at version 2.3.8 in folder: /home/dan/Arduino/libraries/OneWire 
+Using library DallasTemperature at version 3.9.0 in folder: /home/dan/Arduino/libraries/DallasTemperature 
+Using library WiFi at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/WiFi 
+Using library EEPROM at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/EEPROM 
+Using library WebServer at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/WebServer 
+Using library Ethernet at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Ethernet 
+Using library ESPmDNS at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/ESPmDNS 
+Using library ArduinoOTA at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/ArduinoOTA 
+Using library Update at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Update 
+Using library AsyncTCP at version 1.1.4 in folder: /home/dan/Arduino/libraries/AsyncTCP 
+Using library ESPAsyncWebServer at version 1.2.3 in folder: /home/dan/Arduino/libraries/ESPAsyncWebServer 
+Using library FS at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/FS 
+Using library AsyncElegantOTA at version 2.2.8 in folder: /home/dan/Arduino/libraries/AsyncElegantOTA 
+Using library PubSubClient at version 2.8 in folder: /home/dan/Arduino/libraries/PubSubClient 
+Using library Wire at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Wire 
 */
 //-------------------------------------------------------------------------------------------------------
 const char* REV = "20250423";
@@ -74,7 +80,7 @@ const int USBdetectPin     = 36;  // in
 // FREE GPIO
 const int Gpi39Pin         = 39;  // analog in
 const int Gpio33Pin        = 33;  // in/out (SDA/SBU1)
-const int Gpio32Pin        = 33;  // in/out (SCL/SBU2)
+const int Gpio32Pin        = 32;  // in/out (SCL/SBU2)
 const int Gpio14Pin        = 14;  // in/out
 const int Gpio13Pin        = 13;  // in/out
 const int Gpio12Pin        = 12;  // in/out
@@ -85,8 +91,39 @@ const int Gpio0Pin         =  0;  // in/out (RTS)
 short HardwareRev = 99;
 String YOUR_CALL = "";
 String NET_ID = "";
-
-// compile
+int HWidValue              = 0;
+float T1Celsius = 0;
+float T2Celsius = 0;
+String MACString;
+char MACchar[18];
+float VoltagePOE      = 0.0;
+long WdtTimer=0;
+int BaudRate = 115200; // serial debug baudrate
+int EnableSerialDebug     = 0;
+#define HTTP_SERVER_PORT  80     // Web server port
+unsigned int OutputWatchdog;
+unsigned long WatchdogTimer=0;
+bool DHCP_ENABLE = 1;
+char linebuf[80];
+int charcount=0;
+//Are we currently connected?
+boolean connected = false;
+String HTTP_req;
+long lastMqttReconnectAttempt = 0;
+boolean MQTT_ENABLE     = 1;          // enable public to MQTT broker
+int MQTT_PORT;       // MQTT broker PORT
+boolean MQTT_LOGIN      = 0;          // enable MQTT broker login
+String MQTT_USER= "";    // MQTT broker user login
+String MQTT_PASS= "";   // MQTT broker password
+const int MqttBuferSize = 1000; // 1000
+char mqttTX[MqttBuferSize];
+char mqttPath[MqttBuferSize];
+long MqttStatusTimer[2]{1500,1000};
+long HeartBeatTimer[2]={0,1000};
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 0;
+const int   daylightOffset_sec = 0;
+static bool eth_connected = false;
 #define DS18B20                     // external 1wire Temperature sensor
 #define OTAWEB                      // enable upload firmware via web
 #define ETHERNET                    // Enable ESP32 ethernet (DHCP IPv4)
@@ -97,20 +134,38 @@ String NET_ID = "";
 #define ETH_MDIO 18                 // MDIO pin16
 #define ETH_CLK ETH_CLOCK_GPIO17_OUT    // CLKIN pin5 | settings for ESP32 GATEWAY rev f-g
 #define MQTT               // Enable MQTT debug
-String MACString;
-char MACchar[18];
 // #define ETH_CLK ETH_CLOCK_GPIO0_OUT    // settings for ESP32 GATEWAY rev c and older
 // ETH.begin(ETH_ADDR, ETH_POWER, ETH_MDC, ETH_MDIO, ETH_TYPE, ETH_CLK);
-const char* ssid     = "";
-const char* password = "";
-//-------------------------------------------------------------------------------------------------------
+#define MAX_SRV_CLIENTS 1
+#define WDT_TIMEOUT 73
+#define EEPROM_SIZE 267   /*
+  0|Byte    1|128
+  1|Char    1|A
+  2|UChar   1|255
+  3|Short   2|-32768
+  5|UShort  2|65535
+  7|Int     4|-2147483648
+  11|Uint    4|4294967295
+  15|Long    4|-2147483648
+  19|Ulong   4|4294967295
+  23|Long64  8|0x00FFFF8000FF4180
+  31|Ulong64 8|0x00FFFF8000FF4180
+  39|Float   4|1234.1234
+  43|Double  8|123456789.12345679
+  51|Bool    1|1
+
+  0-1   - NET_ID
+  141-160 - YOUR_CALL
+  161-164 - MQTT broker IP
+  165-166 - MQTT_PORT
+  168 - MQTT_LOGIN
+  226-227 BaudRate
+  236-245 - MQTT_USER
+  246-265 - MQTT_PASS
+
+  !! Increment EEPROM_SIZE #define !! */
 
 #include "esp_adc_cal.h"
-
-int HWidValue              = 0;
-float T1Celsius = 0;
-float T2Celsius = 0;
-
 #if defined(DS18B20)
   bool ExtTemp = true;
   #include <OneWire.h>
@@ -122,135 +177,34 @@ float T2Celsius = 0;
   DallasTemperature sensors2(&oneWire2);
   DeviceAddress T1, T2;
 #endif
-
-float VoltagePOE      = 0.0;
 #include "esp_attr.h"
-
-// 73 seconds WDT (WatchDogTimer)
 #include <esp_task_wdt.h>
-#define WDT_TIMEOUT 73
-long WdtTimer=0;
-
-#define EnableOTA                // Enable flashing ESP32 Over The Air
-int EnableSerialDebug     = 0;
-#define HTTP_SERVER_PORT  80     // Web server port
-
-int BaudRate = 115200; // serial debug baudrate
-
-int i = 0;
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "EEPROM.h"
-#define EEPROM_SIZE 267   /*
-
- 0|Byte    1|128
- 1|Char    1|A
- 2|UChar   1|255
- 3|Short   2|-32768
- 5|UShort  2|65535
- 7|Int     4|-2147483648
-11|Uint    4|4294967295
-15|Long    4|-2147483648
-19|Ulong   4|4294967295
-23|Long64  8|0x00FFFF8000FF4180
-31|Ulong64 8|0x00FFFF8000FF4180
-39|Float   4|1234.1234
-43|Double  8|123456789.12345679
-51|Bool    1|1
-
-0-1   - NET_ID
-141-160 - YOUR_CALL
-161-164 - MQTT broker IP
-165-166 - MQTT_PORT
-168 - MQTT_LOGIN
-226-227 BaudRate
-236-245 - MQTT_USER
-246-265 - MQTT_PASS
-
-!! Increment EEPROM_SIZE #define !!
-
-*/
-unsigned int OutputWatchdog;
-unsigned long WatchdogTimer=0;
-
-//ajax
 #include <WebServer.h>
-// #include "index.h"  //Web page header file
-// #include "index-cal.h"  //Web page header file
 WebServer ajaxserver(HTTP_SERVER_PORT+8);
-
 WiFiServer server(HTTP_SERVER_PORT);
-#if defined(CN3A)
-  bool DHCP_ENABLE = 0;
-#else
-  bool DHCP_ENABLE = 1;
-#endif
-// Client variables
-char linebuf[80];
-int charcount=0;
-//Are we currently connected?
-boolean connected = false;
-//The udp library class
-WiFiUDP UdpCommand;
-uint8_t buffer[50] = "";
-unsigned char packetBuffer[10];
-int UDPpacketSize;
-byte TxUdpBuffer[8];
 #include <ETH.h>
-static bool eth_connected = false;
-IPAddress RemoteSwIP(0, 0, 0, 0);         // remote UDP IP switch - set from UDP DetectRemote array
-int RemoteSwPort         = 0;             // remote UDP IP switch port
-String HTTP_req;
-#if defined(EnableOTA)
-  #include <ESPmDNS.h>
-  #include <ArduinoOTA.h>
-#endif
 #if defined(OTAWEB)
   #include <AsyncTCP.h>
   #include <ESPAsyncWebServer.h>
   #include <AsyncElegantOTA.h>
   AsyncWebServer OTAserver(82);
 #endif
-
 #if defined(MQTT)
   #include <PubSubClient.h>
   WiFiClient espClient;
   PubSubClient mqttClient(espClient);
-   long lastMqttReconnectAttempt = 0;
 #endif
-boolean MQTT_ENABLE     = 1;          // enable public to MQTT broker
 IPAddress mqtt_server_ip(0, 0, 0, 0);
-int MQTT_PORT;       // MQTT broker PORT
-boolean MQTT_LOGIN      = 0;          // enable MQTT broker login
-String MQTT_USER= "";    // MQTT broker user login
-String MQTT_PASS= "";   // MQTT broker password
-
-const int MqttBuferSize = 1000; // 1000
-char mqttTX[MqttBuferSize];
-char mqttPath[MqttBuferSize];
-long MqttStatusTimer[2]{1500,1000};
-long HeartBeatTimer[2]={0,1000};
-
 #include <Wire.h>
-#define I2C_SDA 33
-#define I2C_SCL 32
-
-// ntp
 #include "time.h"
-const char* ntpServer = "pool.ntp.org";
-// const char* ntpServer = "tik.cesnet.cz";
-// const char* ntpServer = "time.google.com";
-const long  gmtOffset_sec = 0;
-const int   daylightOffset_sec = 0;
-
-#define MAX_SRV_CLIENTS 1
 WiFiServer SerialServer;
 WiFiClient SerialServerClients[MAX_SRV_CLIENTS];
-
 //-------------------------------------------------------------------------------------------------------
 
 void setup() {
-
   Serial.begin(115200); //BaudRate
   while(!Serial) {
     ; // wait for serial port to connect. Needed for native USB port only
@@ -274,7 +228,6 @@ void setup() {
     sensors2.begin();
 
     // locate devices on the bus
-    // Pro T1
     Serial.print("T1   found ");
     Serial.print(sensors1.getDeviceCount(), DEC);
     if (sensors1.getAddress(T1, 0)) {
@@ -289,7 +242,6 @@ void setup() {
       Serial.println(" address");
     }
 
-    // Pro T2
     Serial.print("T2   found ");
     Serial.print(sensors2.getDeviceCount(), DEC);
     if (sensors2.getAddress(T2, 0)) {
@@ -304,57 +256,7 @@ void setup() {
       Serial.println(" address");
     }
 
-    // report parasite power requirements
-    //  Serial.print("Parasite power is: ");
-    //  if (sensors.isParasitePowerMode()) Serial.println("ON");
-    //  else Serial.println("OFF");
-
-    // Search for devices on the bus and assign based on an index. Ideally,
-    // you would do this to initially discover addresses on the bus and then
-    // use those addresses and manually assign them (see above) once you know
-    // the devices on your bus (and assuming they don't change).
-    //
-    // method 1: by index
-    //  if (!sensors.getAddress(outsideThermometer, 1)) Serial.println("Unable to find address for Device 1");
-
-    // method 2: search()
-    // search() looks for the next device. Returns 1 if a new address has been
-    // returned. A zero might mean that the bus is shorted, there are no devices,
-    // or you have already retrieved all of them. It might be a good idea to
-    // check the CRC to make sure you didn't get garbage. The order is
-    // deterministic. You will always get the same devices in the same order
-    //
-    // Must be called before search()
-    //oneWire.reset_search();
-    // assigns the first address found to insideThermometer
-    //if (!oneWire.search(insideThermometer)) Serial.println("Unable to find address for insideThermometer");
-    // assigns the seconds address found to outsideThermometer
-    //if (!oneWire.search(outsideThermometer)) Serial.println("Unable to find address for outsideThermometer");
-
-    // show the addresses we found on the bus
-    
-    //  Serial.print("Device 1 Address: ");
-    //  printAddress(outsideThermometer);
-    //  Serial.println();
-
-    // set the resolution to 9 bit per device
-    // sensors1.setResolution(T1, TEMPERATURE_PRECISION);
-    // sensors2.setResolution(T2, TEMPERATURE_PRECISION);
-    // //  sensors.setResolution(outsideThermometer, TEMPERATURE_PRECISION);
-
-    // Serial.print("T1 Resolution: ");
-    // Serial.print(sensors1.getResolution(T1), DEC);
-    // Serial.println();
-    // Serial.print("T2 Resolution: ");
-    // Serial.print(sensors2.getResolution(T2), DEC);
-    // Serial.println();
-
-    //  Serial.print("Device 1 Resolution: ");
-    //  Serial.print(sensors.getResolution(outsideThermometer), DEC);
-    //  Serial.println();
   #endif  
-
-///////////
 
   // Listen source
   if (!EEPROM.begin(EEPROM_SIZE)){
@@ -476,51 +378,6 @@ void setup() {
     //   ChipidHex = String(long1, HEX) + String(long2, HEX); // six octets
     //   YOUR_CALL=ChipidHex;
 
-  #if defined(EnableOTA)
-    // Port defaults to 3232
-    // ArduinoOTA.setPort(3232);
-    // Hostname defaults to esp3232-[MAC]
-
-    // String StringHostname = "WX-station-"+String(NET_ID, HEX);
-    String StringHostname = "ROT-"+String(YOUR_CALL);
-    char copy[13];
-    StringHostname.toCharArray(copy, 13);
-
-    ArduinoOTA.setHostname(copy);
-    ArduinoOTA.setPassword("remoteqth");
-    // $ echo password | md5sum
-    // ArduinoOTA.setPasswordHash("5587ba7a03b12a409ee5830cea97e079");
-    ArduinoOTA
-      .onStart([]() {
-        esp_task_wdt_reset();
-        WdtTimer=millis();
-
-        String type;
-        if (ArduinoOTA.getCommand() == U_FLASH)
-          type = "sketch";
-        else // U_SPIFFS
-          type = "filesystem";
-
-        // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-        Serial.println("Start updating " + type);
-      })
-      .onEnd([]() {
-        Serial.println("\nEnd");
-      })
-      .onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-      })
-      .onError([](ota_error_t error) {
-        Serial.printf("Error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-        else if (error == OTA_END_ERROR) Serial.println("End Failed");
-      });
-
-    ArduinoOTA.begin();
-  #endif
   #if defined(OTAWEB)
     OTAserver.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send(200, "text/plain", "PSE QSY to /update");
@@ -528,13 +385,6 @@ void setup() {
     AsyncElegantOTA.begin(&OTAserver);    // Start ElegantOTA
     OTAserver.begin();
   #endif
-
-
-
-  
-  //------------------------------------------------
-
-  // digitalWrite(EnablePin,0);
 
   // WDT
   esp_task_wdt_init(WDT_TIMEOUT, true); //enable panic so ESP32 restarts
@@ -558,21 +408,18 @@ void loop() {
   Mqtt();
   CLI2();
   ajaxserver.handleClient();
-  Watchdog();
-
-  
-  #if defined(EnableOTA)
-   ArduinoOTA.handle();
-  #endif
-
+  Watchdog();  
   #if defined(OTAWEB)
-   // OTAserver.on("/printIp", HTTP_GET, [](AsyncWebServerRequest *request){
-   //     request->send(200, "text/plain", "ok");
-   //     Serial.println(request->client()->remoteIP());
-   // });
    AsyncElegantOTA.loop();
   #endif
+  // SPACE FOR YOUR CODE
+
+
+
+
+  
 }
+
 // SUBROUTINES -------------------------------------------------------------------------------------------------------
 
 #if defined(DS18B20)
@@ -648,7 +495,6 @@ void Watchdog(){
     }
   }
   #endif
-
 }
 
 //-------------------------------------------------------------------------------------------------------
@@ -677,7 +523,6 @@ void CLI2(){
   }
   incomingByte=0;
 }
-
 
 //-------------------------------------------------------------------------------------------------------
 void Prn(int LN, String STR){
