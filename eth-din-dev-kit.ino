@@ -25,22 +25,23 @@ Used MQTT-WALL, credit Adam Hořčica, is under MIT license,
 see https://github.com/bastlirna/mqtt-wall/blob/master/license.txt
 
 MQTT monitor
-mosquitto_sub -v -h 192.168.1.200 -t 'OK1HRA/ROT/#'
-mosquitto_sub -v -h 54.38.157.134 -t 'OK1HRA/1/ROT/#'
+mosquitto_sub -v -h 192.168.1.200 -t 'OK1HRA/#'
+mosquitto_sub -v -h 54.38.157.134 -t 'OK1HRA/1/#'
 
 MQTT topic
-mosquitto_pub -h 192.168.1.200 -t OK1HRA/0/ROT/Target -m '10'
-mosquitto_pub -h 54.38.157.134 -t BD:2F/0/ROT/Target -m '10'
-mosquitto_pub -h 54.38.157.134 -t 3D:D3/0/ROT/RxAzimuth -m '10'
+mosquitto_pub -h 192.168.1.200 -t OK1HRA/0/Target -m '10'
+mosquitto_pub -h 54.38.157.134 -t BD:2F/0/Target -m '10'
+mosquitto_pub -h 54.38.157.134 -t 3D:D3/0/RxAzimuth -m '10'
 
 TODO
 - infrared photo
 - rs485/mqtt proxy
 - gpio to mqtt report
 - mqtt to gpio control
-
+- ds18b20 resolution to setup
 
 Changelog:
+- detect and read T1 and T2 termistor and public to MQTT every 20s
 
 IDE 1.8.19
 Použití knihovny WiFi ve verzi 2.0.0 v adresáři: /home/dan/Arduino/hardware/espressif/esp32/libraries/WiFi
@@ -106,22 +107,24 @@ const char* password = "";
 #include "esp_adc_cal.h"
 
 int HWidValue              = 0;
-float TemperatureCelsiusDS18B20 = 0;
-float TemperatureCelsius = 0;
+float T1Celsius = 0;
+float T2Celsius = 0;
 
 #if defined(DS18B20)
   bool ExtTemp = true;
   #include <OneWire.h>
   #include <DallasTemperature.h>
   // Data wire is plugged into port 2 on the Arduino
-  #define ONE_WIRE_BUS 5
+  // #define ONE_WIRE_BUS 5
   #define TEMPERATURE_PRECISION 10 // 9: ±0,5°C | 10: ±0,25°C | 11: ±0,125°C
   // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
-  OneWire oneWire(TermistorT1Pin);
+  OneWire oneWire1(TermistorT1Pin);
+  OneWire oneWire2(TermistorT2Pin);
   // Pass our oneWire reference to Dallas Temperature.
-  DallasTemperature sensors(&oneWire);
+  DallasTemperature sensors1(&oneWire1);
+  DallasTemperature sensors2(&oneWire2);
   // arrays to hold device addresses
-  DeviceAddress insideThermometer, outsideThermometer;
+  DeviceAddress T1, T2;
   // Assign address manually. The addresses below will need to be changed
   // to valid device addresses on your bus. Device address can be retrieved
   // by using either oneWire.search(deviceAddress) or individually via
@@ -265,8 +268,8 @@ unsigned long WatchdogTimer=0;
 
 //ajax
 #include <WebServer.h>
-#include "index.h"  //Web page header file
-#include "index-cal.h"  //Web page header file
+// #include "index.h"  //Web page header file
+// #include "index-cal.h"  //Web page header file
 WebServer ajaxserver(HTTP_SERVER_PORT+8);
 
 WiFiServer server(HTTP_SERVER_PORT);
@@ -490,6 +493,12 @@ String AprsCoordinates;
 
 void setup() {
 
+  Serial.begin(115200); //BaudRate
+  while(!Serial) {
+    ; // wait for serial port to connect. Needed for native USB port only
+  }
+  Serial.println("ETH DIN rail development kit");
+  Serial.println("----------------------------");
   pinMode(HWidPin, INPUT);
     HWidValue = readADC_Cal(analogRead(HWidPin));
     if(HWidValue<=200){
@@ -497,15 +506,45 @@ void setup() {
     }else if(HWidValue>200 && HWidValue<=450){
       HardwareRev=1;  // ??
     }
+  Serial.println("HW   "+String(HardwareRev));
+  Serial.println("FW   "+String(REV));
+  
   pinMode(VoltagePoePin, INPUT);
 
   #if defined(DS18B20)
-    sensors.begin();
+    sensors1.begin();
+    sensors2.begin();
 
     // locate devices on the bus
-    Serial.print("DS18B20 found ");
-    Serial.print(sensors.getDeviceCount(), DEC);
-    Serial.println(" devices.");
+    // Pro T1
+    Serial.print("T1   found ");
+    Serial.print(sensors1.getDeviceCount(), DEC);
+    if (sensors1.getAddress(T1, 0)) {
+      Serial.print(" address: ");
+      printAddress(T1);
+      sensors1.setResolution(T1, TEMPERATURE_PRECISION);
+      Serial.print(" resolution: ");
+      Serial.print(sensors1.getResolution(T1), DEC);
+      Serial.println();
+    } else {
+      ExtTemp = false;
+      Serial.println(" address");
+    }
+
+    // Pro T2
+    Serial.print("T2   found ");
+    Serial.print(sensors2.getDeviceCount(), DEC);
+    if (sensors2.getAddress(T2, 0)) {
+      Serial.print(" address: ");
+      printAddress(T2);
+      sensors1.setResolution(T2, TEMPERATURE_PRECISION);
+      Serial.print(" resolution: ");
+      Serial.print(sensors2.getResolution(T2), DEC);
+      Serial.println();
+    } else {
+      ExtTemp = false;
+      Serial.println(" address");
+    }
 
     // report parasite power requirements
     //  Serial.print("Parasite power is: ");
@@ -518,10 +557,6 @@ void setup() {
     // the devices on your bus (and assuming they don't change).
     //
     // method 1: by index
-    if (!sensors.getAddress(insideThermometer, 0)){
-      ExtTemp = false;
-      Serial.println("DS18B20 unable to find address for Device 0");
-    }
     //  if (!sensors.getAddress(outsideThermometer, 1)) Serial.println("Unable to find address for Device 1");
 
     // method 2: search()
@@ -539,21 +574,22 @@ void setup() {
     //if (!oneWire.search(outsideThermometer)) Serial.println("Unable to find address for outsideThermometer");
 
     // show the addresses we found on the bus
-    Serial.print("DS18B20 device 0 Address: ");
-    printAddress(insideThermometer);
-    Serial.println();
-
+    
     //  Serial.print("Device 1 Address: ");
     //  printAddress(outsideThermometer);
     //  Serial.println();
 
     // set the resolution to 9 bit per device
-    sensors.setResolution(insideThermometer, TEMPERATURE_PRECISION);
-    //  sensors.setResolution(outsideThermometer, TEMPERATURE_PRECISION);
+    // sensors1.setResolution(T1, TEMPERATURE_PRECISION);
+    // sensors2.setResolution(T2, TEMPERATURE_PRECISION);
+    // //  sensors.setResolution(outsideThermometer, TEMPERATURE_PRECISION);
 
-    Serial.print("DS18B20 device 0 Resolution: ");
-    Serial.print(sensors.getResolution(insideThermometer), DEC);
-    Serial.println();
+    // Serial.print("T1 Resolution: ");
+    // Serial.print(sensors1.getResolution(T1), DEC);
+    // Serial.println();
+    // Serial.print("T2 Resolution: ");
+    // Serial.print(sensors2.getResolution(T2), DEC);
+    // Serial.println();
 
     //  Serial.print("Device 1 Resolution: ");
     //  Serial.print(sensors.getResolution(outsideThermometer), DEC);
@@ -595,165 +631,6 @@ void setup() {
     digitalWrite(AZtwoWirePin, LOW);
   pinMode(AZpreampPin, OUTPUT);
     digitalWrite(AZpreampPin, LOW);
-
-  // pinMode(ShiftOutClockPin, OUTPUT);
-  // pinMode(ShiftOutDataPin, OUTPUT);
-  // pinMode(ShiftOutLatchPin, OUTPUT);
-  // digitalWrite(ShiftOutLatchPin, HIGH);
-
-  // for (int i = 0; i < 8; i++) {
-  //   pinMode(TestPin[i], INPUT);
-  // }
-  #if HWREV==8
-    pinMode(RainPin, INPUT);
-  #endif
-  #if HWREV==7
-    pinMode(Rain1Pin, INPUT);
-    pinMode(Rain2Pin, INPUT);
-  #endif
-
-  pinMode(RpmPin, INPUT);
-  // pinMode(EnablePin, OUTPUT);
-  // digitalWrite(EnablePin,1);
-
-  // pinMode(ButtonPin, INPUT);
-  // SHIFT IN
-  // pinMode(ShiftInLatchPin, OUTPUT);
-  // pinMode(ShiftInClockPin, OUTPUT);
-  // pinMode(ShiftInDataPin, INPUT);
-
-  Serial.begin(115200); //BaudRate
-  while(!Serial) {
-    ; // wait for serial port to connect. Needed for native USB port only
-  }
-  Serial.println("ETH DIN rail development kit");
-  Serial.println("----------------------------");
-  Serial.println("HW  "+String(HardwareRev));
-  Serial.println("FW  "+String(REV));
-
-  #if defined(DS18B20)
-    sensors.begin();
-
-    // locate devices on the bus
-    Serial.print("DS18B20 found ");
-    Serial.print(sensors.getDeviceCount(), DEC);
-    Serial.println(" devices.");
-
-    // report parasite power requirements
-    //  Serial.print("Parasite power is: ");
-    //  if (sensors.isParasitePowerMode()) Serial.println("ON");
-    //  else Serial.println("OFF");
-
-    // Search for devices on the bus and assign based on an index. Ideally,
-    // you would do this to initially discover addresses on the bus and then
-    // use those addresses and manually assign them (see above) once you know
-    // the devices on your bus (and assuming they don't change).
-    //
-    // method 1: by index
-    if (!sensors.getAddress(insideThermometer, 0)){
-      ExtTemp = false;
-      Serial.println("DS18B20 unable to find address for Device 0");
-    }
-    //  if (!sensors.getAddress(outsideThermometer, 1)) Serial.println("Unable to find address for Device 1");
-
-    // method 2: search()
-    // search() looks for the next device. Returns 1 if a new address has been
-    // returned. A zero might mean that the bus is shorted, there are no devices,
-    // or you have already retrieved all of them. It might be a good idea to
-    // check the CRC to make sure you didn't get garbage. The order is
-    // deterministic. You will always get the same devices in the same order
-    //
-    // Must be called before search()
-    //oneWire.reset_search();
-    // assigns the first address found to insideThermometer
-    //if (!oneWire.search(insideThermometer)) Serial.println("Unable to find address for insideThermometer");
-    // assigns the seconds address found to outsideThermometer
-    //if (!oneWire.search(outsideThermometer)) Serial.println("Unable to find address for outsideThermometer");
-
-    // show the addresses we found on the bus
-    Serial.print("DS18B20 device 0 Address: ");
-    printAddress(insideThermometer);
-    Serial.println();
-
-    //  Serial.print("Device 1 Address: ");
-    //  printAddress(outsideThermometer);
-    //  Serial.println();
-
-    // set the resolution to 9 bit per device
-    sensors.setResolution(insideThermometer, TEMPERATURE_PRECISION);
-    //  sensors.setResolution(outsideThermometer, TEMPERATURE_PRECISION);
-
-    Serial.print("DS18B20 device 0 Resolution: ");
-    Serial.print(sensors.getResolution(insideThermometer), DEC);
-    Serial.println();
-
-    //  Serial.print("Device 1 Resolution: ");
-    //  Serial.print(sensors.getResolution(outsideThermometer), DEC);
-    //  Serial.println();
-  #endif
-
-  #if defined(BMP280)
-    // I2Cone.begin(0x76, I2C_SDA, I2C_SCL, 100000); // SDA pin, SCL pin, 100kHz frequency
-    // I2Cone.begin(I2C_SDA, I2C_SCL, (uint32_t)100000); // SDA pin, SCL pin, 100kHz frequency
-    Serial.print("BMP280 sensor init ");
-    if(!bmp.begin(0x76)){
-      Serial.println("failed!");
-      // while (1) delay(10);
-      BMP280enable=false;
-    }else{
-      Serial.println("OK");
-      BMP280enable=true;
-      /* Default settings from datasheet. */
-      bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
-        Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
-        Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
-        Adafruit_BMP280::FILTER_X16,      /* Filtering. */
-        Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
-        bmp_temp->printSensorDetails();
-    }
-  #endif
-
-  #if defined(HTU21D) || defined(SHT)
-    // Wire.begin(I2C_SDA, I2C_SCL);
-  #endif
-  #if defined(HTU21D)
-    Serial.print("HTU21D sensor init ");
-    if(!htu.begin()){
-      Serial.println("failed!");
-      // while (1);
-      HTU21Denable=false;
-    }else{
-      Serial.println("OK");
-      HTU21Denable=true;
-    }
-  #endif
-
-  #if defined(SHT21)
-    Serial.println(__FILE__);
-    Serial.print("SHT2x_LIB_VERSION: \t");
-    Serial.println(SHT2x_LIB_VERSION);
-
-    internal.begin(&I2Cone);
-    // external.begin(&I2Ctwo);
-
-    uint8_t stat = internal.getStatus();
-    Serial.print(stat, HEX);
-    Serial.println();
-    // stat = external.getStatus();
-    // Serial.print(stat, HEX);
-    // Serial.println();
-    Serial.println();
-  #endif
-
-  #if !defined(BMP280) && !defined(HTU21D)
-    // Wire.begin(I2C_SDA, I2C_SCL);
-  #endif
-
-  // // SD
-  // if(!SD_MMC.begin()){
-  //   Serial.println("SD card Mount Failed");
-  //   // return;
-  // }
 
   // Listen source
   if (!EEPROM.begin(EEPROM_SIZE)){
@@ -937,69 +814,9 @@ void setup() {
     OTAserver.begin();
   #endif
 
-  #if defined(Ser2net)
-    Serial_one.begin(SERIAL1_BAUDRATE, SERIAL_8N1, RX1, TX1);
-  // Serial2.begin(9600);
-  SerialServer.begin(SerialServerIPport);
-  SerialServer.setNoDelay(true);
-  #endif
-
-  TelnetServer.begin(TelnetServerIPport);
-  // TelnetlServer.setNoDelay(true);
 
 
-  #if HWREV==8
-    int intBuf = analogRead(RainPin);
-    if(intBuf<1000){
-      RainStatus=false;
-    }else if(intBuf>=1000 && intBuf<=2000){
-      RainStatus=true;
-    }
-  #endif
-  #if HWREV==7
-    if(digitalRead(Rain1Pin)==0 && digitalRead(Rain2Pin)==1){
-      RainStatus=false;
-    }else if(digitalRead(Rain1Pin)==1 && digitalRead(Rain2Pin)==0){
-      RainStatus=true;
-    }
-  #endif
-
-  #if defined(RF69_EXTERNAL_SENSOR)
-   // clock, miso,mosi, ss
-    SPI.begin(14, 15, 2, 0);
-    //while (!Serial) { delay(1); } // wait until serial console is open, remove if not tethered to computer
-
-    Serial.println();
-    Serial.print("RFM69 radio init ");
-    if (!rf69.init()) {
-      Serial.println("failed!");
-      RF69enable = false;
-      // while (1);
-    }else{
-      Serial.println("OK");
-      RF69enable = true;
-
-      // Defaults after init are 434.0MHz, modulation GFSK_Rb250Fd250, +13dbM (for low power module)
-      // No encryption
-      Serial.print("RFM69 setFrequency ");
-      if (!rf69.setFrequency(RF69_FREQ)) {
-        Serial.println("failed!");
-      }else{
-        Serial.println("OK");
-        // If you are using a high power RF69 eg RFM69HW, you *must* set a Tx power with the
-        // ishighpowermodule flag set like this:
-        rf69.setTxPower(20, true);  // range from 14-20 for power, 2nd arg must be true for 69HCW
-
-        // The encryption key has to be the same as the one in the server
-        uint8_t key[] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-          0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08
-        };
-        rf69.setEncryptionKey(key);
-        Serial.print("RFM69 radio @");  Serial.print((int)RF69_FREQ);  Serial.println(" MHz");
-      }
-    }
-
-  #endif
+  
   //------------------------------------------------
 
   // digitalWrite(EnablePin,0);
@@ -1025,7 +842,6 @@ void setup() {
 void loop() {
   http();
   Mqtt();
-  // CLI();
   CLI2();
   ajaxserver.handleClient();
   Watchdog();
@@ -1055,39 +871,6 @@ void loop() {
       if (deviceAddress[i] < 16) Serial.print("0");
       Serial.print(deviceAddress[i], HEX);
     }
-  }
-
-  // function to print the temperature for a device
-  void printTemperature(DeviceAddress deviceAddress)
-  {
-    float tempC = sensors.getTempC(deviceAddress);
-    if(tempC == DEVICE_DISCONNECTED_C)
-    {
-      Serial.println("DS18B20 Error: Could not read temperature data");
-      return;
-    }
-    // Serial.print("Temp C: ");
-    Serial.print(tempC);
-  //  Serial.print(" Temp F: ");
-  //  Serial.print(DallasTemperature::toFahrenheit(tempC));
-  }
-
-  // function to print a device's resolution
-  void printResolution(DeviceAddress deviceAddress)
-  {
-    Serial.print("Resolution: ");
-    Serial.print(sensors.getResolution(deviceAddress));
-    Serial.println();
-  }
-
-  // main function to print information about a device
-  void printData(DeviceAddress deviceAddress)
-  {
-    Serial.print("DS18B20 address: ");
-    printAddress(deviceAddress);
-    Serial.print(" ");
-    printTemperature(deviceAddress);
-    Serial.println();
   }
 #endif
 
@@ -1135,14 +918,21 @@ void Watchdog(){
   }
 
   #if defined(DS18B20)
-    if(millis()-OneWireTimer > 20000){
-      OneWireTimer = millis();
-      sensors.requestTemperatures();
-        // float temperatureC = sensors.getTempCByIndex(0);
-        TemperatureCelsiusDS18B20 = sensors.getTempC(insideThermometer);
-        TemperatureCelsius = TemperatureCelsiusDS18B20;
-        MqttPubString("Temperature-Celsius-T1", String(TemperatureCelsiusDS18B20), false);
+  if (millis() - OneWireTimer > 20000) {
+    OneWireTimer = millis();
+    sensors1.requestTemperatures();
+    sensors2.requestTemperatures();
+  
+    T1Celsius = sensors1.getTempC(T1);
+    if(T1Celsius != -127){
+      MqttPubString("T1-Celsius", String(T1Celsius), false);
     }
+  
+    T2Celsius = sensors2.getTempC(T2);
+    if(T2Celsius != -127){
+      MqttPubString("T2-Celsius", String(T2Celsius), false);
+    }
+  }
   #endif
 
   if(!TelnetServerClients[0].connected() && FirstListCommands==false){
@@ -1294,7 +1084,7 @@ void http(){
           webClient.print(YOUR_CALL);
           webClient.print(F("/"));
           webClient.print(NET_ID);
-          webClient.println(F("/ROT/#\","));
+          webClient.println(F("/#\","));
           // END TOPIC
           webClient.println(F("              showCounter: true,"));
           webClient.println(F("              alphabeticalSort: true,"));
@@ -1451,7 +1241,7 @@ void EthEvent(WiFiEvent_t event)
       // Serial.println(ETH.localIP());
       // Serial.println("===============================");
       if (ETH.fullDuplex()) {
-        Serial.print("FULL_DUPLEX, ");
+        Serial.print("     FULL_DUPLEX, ");
       }
       Serial.print(ETH.linkSpeed());
       Serial.println("Mbps");
@@ -1459,7 +1249,7 @@ void EthEvent(WiFiEvent_t event)
 
       #if defined(MQTT)
         if(MQTT_ENABLE == true){
-          Serial.print("EthEvent-mqtt ");
+          Serial.print("     EthEvent-mqtt ");
           mqttClient.setServer(mqtt_server_ip, MQTT_PORT);
           mqttClient.setCallback(MqttRx);
           lastMqttReconnectAttempt = 0;
@@ -1596,28 +1386,28 @@ bool mqttReconnect() {
 
 //------------------------------------------------------------------------------------
 void reSubscribe(){
-    String topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/ROT/Target";
+    String topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/Target";
     const char *cstr = topic.c_str();
     if(mqttClient.subscribe(cstr)==true){
       if(EnableSerialDebug>0){
         Prn(3, 1, " > subscribe "+String(cstr));
       }
     }
-    topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/ROT/get";
+    topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/get";
     const char *cstr1 = topic.c_str();
     if(mqttClient.subscribe(cstr1)==true){
       if(EnableSerialDebug>0){
         Prn(3, 1, " > subscribe "+String(cstr1));
       }
     }
-    topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/ROT/stop";
+    topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/stop";
     const char *cstr2 = topic.c_str();
     if(mqttClient.subscribe(cstr2)==true){
       if(EnableSerialDebug>0){
         Prn(3, 1, " > subscribe "+String(cstr2));
       }
     }
-    topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/ROT/RxAzimuth";
+    topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/RxAzimuth";
     const char *cstr3 = topic.c_str();
     if(mqttClient.subscribe(cstr3)==true){
       if(EnableSerialDebug>0){
@@ -1638,7 +1428,7 @@ void MqttRx(char *topic, byte *payload, unsigned int length) {
   }
 
     // // RxAzimuth
-    // CheckTopicBase = String(YOUR_CALL) + "/" + String(NET_ID) + "/ROT/RxAzimuth";
+    // CheckTopicBase = String(YOUR_CALL) + "/" + String(NET_ID) + "/RxAzimuth";
     // if ( CheckTopicBase.equals( String(topic) ) ){
     //   RxAzimuth = 0;
     //   unsigned long exp = 1;
@@ -1664,20 +1454,20 @@ void AfterMQTTconnect(){
         IPAddress IPlocalAddr = ETH.localIP();                           // get
         String IPlocalAddrString = String(IPlocalAddr[0]) + "." + String(IPlocalAddr[1]) + "." + String(IPlocalAddr[2]) + "." + String(IPlocalAddr[3]);   // to string
         IPlocalAddrString.toCharArray( mqttTX, 50 );                          // to array
-        String path2 = String(YOUR_CALL) + "/" + String(NET_ID) + "/ROT/ip";
+        String path2 = String(YOUR_CALL) + "/" + String(NET_ID) + "/ip";
         path2.toCharArray( mqttPath, 100 );
         mqttClient.publish(mqttPath, mqttTX, true);
-          Serial.print("MQTT-TX ");
+          Serial.print("MQTT TX>");
           Serial.print(mqttPath);
           Serial.print(" ");
           Serial.println(mqttTX);
 
         // String MAClocalAddrString = ETH.macAddress();   // to string
         // MAClocalAddrString.toCharArray( mqttTX, 50 );                          // to array
-        path2 = String(YOUR_CALL) + "/" + String(NET_ID) + "/ROT/mac";
+        path2 = String(YOUR_CALL) + "/" + String(NET_ID) + "/mac";
         path2.toCharArray( mqttPath, 100 );
         mqttClient.publish(mqttPath, MACchar, true);
-          Serial.print("MQTT-TX ");
+          Serial.print("MQTT TX>");
           Serial.print(mqttPath);
           Serial.print(" ");
           Serial.println(MACchar);
@@ -1697,14 +1487,14 @@ void MqttPubString(String TOPIC, String DATA, bool RETAIN){
   if(mqttClient.connected()==true){
     if(MQTT_LOGIN == true){
       if (mqttClient.connect(MACchar,MQTT_USER.c_str(),MQTT_PASS.c_str())){
-        String topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/ROT/"+TOPIC;
+        String topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/"+TOPIC;
         topic.toCharArray( mqttPath, 50 );
         DATA.toCharArray( mqttTX, 50 );
         mqttClient.publish(mqttPath, mqttTX, RETAIN);
       }
     }else{
       if (mqttClient.connect(MACchar)) {
-        String topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/ROT/"+TOPIC;
+        String topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/"+TOPIC;
         topic.toCharArray( mqttPath, 50 );
         DATA.toCharArray( mqttTX, 50 );
         mqttClient.publish(mqttPath, mqttTX, RETAIN);
