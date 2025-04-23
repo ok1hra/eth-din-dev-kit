@@ -96,6 +96,7 @@ String NET_ID = "";
 #define ETH_MDC 23                  // MDC pin17
 #define ETH_MDIO 18                 // MDIO pin16
 #define ETH_CLK ETH_CLOCK_GPIO17_OUT    // CLKIN pin5 | settings for ESP32 GATEWAY rev f-g
+#define MQTT               // Enable MQTT debug
 String MACString;
 char MACchar[18];
 // #define ETH_CLK ETH_CLOCK_GPIO0_OUT    // settings for ESP32 GATEWAY rev c and older
@@ -114,121 +115,27 @@ float T2Celsius = 0;
   bool ExtTemp = true;
   #include <OneWire.h>
   #include <DallasTemperature.h>
-  // Data wire is plugged into port 2 on the Arduino
-  // #define ONE_WIRE_BUS 5
   #define TEMPERATURE_PRECISION 10 // 9: ±0,5°C | 10: ±0,25°C | 11: ±0,125°C
-  // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
   OneWire oneWire1(TermistorT1Pin);
   OneWire oneWire2(TermistorT2Pin);
-  // Pass our oneWire reference to Dallas Temperature.
   DallasTemperature sensors1(&oneWire1);
   DallasTemperature sensors2(&oneWire2);
-  // arrays to hold device addresses
   DeviceAddress T1, T2;
-  // Assign address manually. The addresses below will need to be changed
-  // to valid device addresses on your bus. Device address can be retrieved
-  // by using either oneWire.search(deviceAddress) or individually via
-  // sensors.getAddress(deviceAddress, index)
-  // DeviceAddress insideThermometer = { 0x28, 0x1D, 0x39, 0x31, 0x2, 0x0, 0x0, 0xF0 };
-  // DeviceAddress outsideThermometer   = { 0x28, 0x3F, 0x1C, 0x31, 0x2, 0x0, 0x0, 0x2 };
 #endif
 
-const int AzimuthPin    = 39;  // analog
-float AzimuthValue      = 0.0;
-int Azimuth             = 0;
-int AzimuthTarget       = 0;
-int RxAzimuth           = 0;
-int Status              = 0; // -3 PwmDwnCCW|-2 CCW|-1 PwmUpCCW|0 off|1 PwmUpCW|2 CW|3 PwmDwnCW
 float VoltagePOE      = 0.0;
-const float VoltageLimit = 11.5; // ! also change if( Number(this.responseText)<11.5){ in index.h file | (11.0) Voltage limit below which the control electronics is unstable
-const int ReversePin    = 16;  //
-const int PwmPin        = 4;   //
-
-// HardwareRev 1
-const int ACcwPin       = 2;
-const int BrakePin      = 33;
-// const int CwCcwButtPin  = 36;  // analog
-const int CwInputPin    = 36;
-const int CcwInputPin   = 5;
-int CwCcwInputValue      = 0;
-const int AZmasterPin   = 32;  // analog
-int AZmaster            = 142;
-int AZmasterValue       = 0;
-const int LedRPin       = 15;
-const int LedGPin       = 14;
-const int LedBPin       = 0;
-const int AZtwoWirePin  = 13;
-const int AZpreampPin   = 12;
-
-// setting PWM properties
-const int PwmFreq = 1000;
-const int PwmResolution = 8;
-const int mosfetPWMChannel = 0;
-const int greenPWMChannel = 2;
-
-// unsigned long TimerTemp;
-
-// interrupts
 #include "esp_attr.h"
-
-// values
-char key[100];
-long MeasureTimer[2]={2800000,300000};   //  millis,timer (5 min)
-
-
-int RainCount;
-String RainCountDayOfMonth;
-bool RainStatus;
-/*
-1mm rain = 15,7cm^2/10 = 1,57ml     <- by rain funnel radius
-10ml = 11,5 pulses = 0,87ml/pulse   <- constanta tilting measuring cup
-*/
-float mmInPulse = 0.2 ; // callibration rain 17,7-20,2 mm with 95 pulse
-
-int WindDir = 0;
-int WindDirShift = 0;
-
-long RpmTimer[2]={0,3000};
-long RpmPulse = 987654321;
-long PeriodMinRpmPulse = 987654321;
-String PeriodMinRpmPulseTimestamp;
-long MinRpmPulse;
-String MinRpmPulseTimestamp;
-unsigned int RpmSpeed = 0;
-unsigned long RpmAverage[2]={1,0};  // counter,sum time
-bool RpmInterrupt = false;
-
-int SpeedAlertLimit_ms = 0;
-int SpeedAlert_ms = 3000;
-// bool NeedSpeedAlert_ms = false;
-long AlertTimer[2]={0,60000};
-//  |alert...........|alert........... everry max 1 minutes and with publish max value in period
 
 // 73 seconds WDT (WatchDogTimer)
 #include <esp_task_wdt.h>
 #define WDT_TIMEOUT 73
 long WdtTimer=0;
 
-byte InputByte[21];
-// #define Ser2net                  // Serial to ip proxy - DISABLE if board revision 0.3 or lower
 #define EnableOTA                // Enable flashing ESP32 Over The Air
-int NumberOfEncoderOutputs = 8;  // 2-16
 int EnableSerialDebug     = 0;
-long FreneticModeTimer ;
 #define HTTP_SERVER_PORT  80     // Web server port
-int IncomingSwitchUdpPort;
-#define ShiftOut                 // Enable ShiftOut register
-#define UdpAnswer                // Send UDP answer confirm packet
-int BroadcastPort;               // destination broadcast packet port
-bool EnableGroupPrefix = 0;      // enable multi controller control
-bool EnableGroupButton = 0;      // group to one from
-unsigned int GroupButton[8]={1,2,3,4,5,6,7,8};
-byte DetectedRemoteSw[16][4];
-unsigned int DetectedRemoteSwPort[16];
 
 int BaudRate = 115200; // serial debug baudrate
-int SERIAL1_BAUDRATE; // serial1 to IP baudrate
-int incomingByte = 0;   // for incoming serial data
 
 int i = 0;
 #include <WiFi.h>
@@ -305,31 +212,15 @@ String HTTP_req;
   AsyncWebServer OTAserver(82);
 #endif
 
-#define MQTT               // Enable MQTT debug
 #if defined(MQTT)
   #include <PubSubClient.h>
-  // #include "PubSubClient.h" // lokalni verze s upravou #define MQTT_MAX_PACKET_SIZE 128
-  // WiFiClient esp32Client;
-  // PubSubClient mqttClient(esp32Client);
   WiFiClient espClient;
   PubSubClient mqttClient(espClient);
-  // PubSubClient mqttClient(ethClient);
-   // PubSubClient mqttClient(server, 1883, callback, ethClient);
    long lastMqttReconnectAttempt = 0;
 #endif
 boolean MQTT_ENABLE     = 1;          // enable public to MQTT broker
 IPAddress mqtt_server_ip(0, 0, 0, 0);
-// byte BrokerIpArray[2][4]{
-//   // {192,168,1,200},   // MQTT broker remoteqth.com
-//   {54,38,157,134},   // MQTT broker remoteqth.com
-// };
-// IPAddress server(10, 24, 213, 92);    // MQTT broker
 int MQTT_PORT;       // MQTT broker PORT
-// int MQTT_PORT_Array[2] = {
-//   1883,
-//   1883
-// };       // MQTT broker PORT
-boolean ELEVATION      = 0;          // enable Elevation function
 boolean MQTT_LOGIN      = 0;          // enable MQTT broker login
 String MQTT_USER= "";    // MQTT broker user login
 String MQTT_PASS= "";   // MQTT broker password
@@ -337,120 +228,12 @@ String MQTT_PASS= "";   // MQTT broker password
 const int MqttBuferSize = 1000; // 1000
 char mqttTX[MqttBuferSize];
 char mqttPath[MqttBuferSize];
-// char mqttTX[100];
-// char mqttPath[100];
 long MqttStatusTimer[2]{1500,1000};
 long HeartBeatTimer[2]={0,1000};
 
-// Shift register
-// CC1 12 CLOCK
-// CC2 13 DATA
-// SBU1 14 LATCH
-// SBU2 15
-// const int ShiftOutClockPin = 12;
-// const int ShiftOutDataPin = 13;
-// const int ShiftOutLatchPin = 14;
-// byte ShiftOutByte=0x00;
-
-bool rxShiftInRead;
-// https://randomnerdtutorials.com/esp32-i2c-communication-arduino-ide/
 #include <Wire.h>
 #define I2C_SDA 33
 #define I2C_SCL 32
-
-#if defined(BMP280)||defined(HTU21D)||defined(SHT21)
-  // #include <SPI.h>
-  #include <Adafruit_Sensor.h>
-  TwoWire I2Cone = TwoWire(0);
-#endif
-
-#if defined(BMP280)
-  #include <Adafruit_BMP280.h>
-  Adafruit_BMP280 bmp(&I2Cone); // use I2C interface
-  Adafruit_Sensor *bmp_temp = bmp.getTemperatureSensor();
-  Adafruit_Sensor *bmp_pressure = bmp.getPressureSensor();
-  bool BMP280enable;
-#endif
-
-#if defined(HTU21D)
-  #include "Adafruit_HTU21DF.h"
-  Adafruit_HTU21DF htu = Adafruit_HTU21DF();
-  bool HTU21Denable;
-#endif
-
-#if defined(SHT21)
-  #include "SHT2x.h"
-  SHT2x internal;
-  // SHT2x external;
-#endif
-
-#if defined(SHT)
-  #include "SHTSensor.h"
-  // Sensor with normal i2c address
-  // Sensor 1 with address pin pulled to GND
-  SHTSensor sht1(SHTSensor::SHT3X);
-  // Sensor with alternative i2c address
-  // Sensor 2 with address pin pulled to Vdd
-  // SHTSensor sht2(SHTSensor::SHT3X_ALT);
-#endif
-
-// https://github.com/PaulStoffregen/RadioHead
-#if defined(RF69_EXTERNAL_SENSOR)
-  bool RF69enable;
-  #include <SPI.h>
-  #include <RH_RF69.h>
-  // Change to 434.0 or other frequency, must match RX's freq!
-  #define RF69_FREQ 434.0
-  #define RFM69_RST     -1   // same as LED
-  #define RFM69_CS      0   // "B"
-  #define RFM69_INT     16   // "A"
-
-  // Singleton instance of the radio driver
-  RH_RF69 rf69(RFM69_CS, RFM69_INT);
-
-  int16_t packetnum = 0;  // packet counter, we increment per xmission
-  String received_data;
-  float humidity, temp_f, temp_f2, temp_PT100, temp_dallas;
-  String temp_radio;
-  String humidity_radio;
-  String vbat_radio;
-
-  uint8_t buf[RH_RF69_MAX_MESSAGE_LEN];
-  uint8_t len = sizeof(buf);
-#endif
-
-const int RpmPin = 39;
-#if HWREV==8
-  const int RainPin = 36;
-#endif
-#if HWREV==7
-  const int Rain1Pin = 36;
-  const int Rain2Pin = 35;
-#endif
-// const int EnablePin = 13;
-// const int ButtonPin = 34;
-
-#if defined(Ser2net)
-  #define RX1 3
-  #define TX1 1
-  HardwareSerial Serial_one(1);
-#endif
-
-const int MappingRow = 5;
-const long mapping[MappingRow][2] = { // ms > m/s
-  {987654321,0},
-  {120,1},
-  {50,2},
-  {2,4},
-  {1,200},
-};
-// WX end
-
-// SD
-// #define ETH_CLK_MODE ETH_CLOCK_GPIO17_OUT
-// #define ETH_PHY_POWER 12
-// #include "FS.h"
-// #include "SD_MMC.h"
 
 // ntp
 #include "time.h"
@@ -461,33 +244,8 @@ const long  gmtOffset_sec = 0;
 const int   daylightOffset_sec = 0;
 
 #define MAX_SRV_CLIENTS 1
-int SerialServerIPport;
-// WiFiServer SerialServer(SerialServerIPport);
 WiFiServer SerialServer;
 WiFiClient SerialServerClients[MAX_SRV_CLIENTS];
-
-int TelnetServerIPport = 23;
-WiFiServer TelnetServer;
-WiFiClient TelnetServerClients[MAX_SRV_CLIENTS];
-IPAddress TelnetServerClientAuth;
-bool TelnetAuthorized = false;
-int TelnetAuthStep=0;
-int TelnetAuthStepFails=0;
-int TelnetLoginFails=0;
-long TelnetLoginFailsBanTimer[2]={0,600000};
-int RandomNumber;
-bool FirstListCommands=true;
-
-int CompareInt;
-
-// APRS
-WiFiClient AprsClient;
-boolean AprsON = false;
-uint16_t AprsPort;
-IPAddress aprs_server_ip(0, 0, 0, 0);
-String AprsPassword;
-String AprsCoordinates;
-
 
 //-------------------------------------------------------------------------------------------------------
 
@@ -598,40 +356,6 @@ void setup() {
 
 ///////////
 
-  pinMode(AzimuthPin, INPUT);
-  // pinMode(CwCcwButtPin, INPUT);
-  pinMode(CwInputPin, INPUT);
-  pinMode(CcwInputPin, INPUT);
-
-  pinMode(ReversePin, OUTPUT);
-    digitalWrite(ReversePin, LOW);
-
-
-  ledcSetup(mosfetPWMChannel, PwmFreq, PwmResolution);
-  ledcSetup(greenPWMChannel, PwmFreq, PwmResolution);
-  ledcAttachPin(PwmPin, mosfetPWMChannel);
-  ledcAttachPin(LedGPin, greenPWMChannel);
-  ledcWrite(mosfetPWMChannel, 0);
-  ledcWrite(greenPWMChannel, 0);
-
-  // HardwareRev 1
-  pinMode(AZmasterPin, INPUT);
-  pinMode(ACcwPin, OUTPUT);
-    digitalWrite(ACcwPin, LOW);
-  pinMode(BrakePin, OUTPUT);
-    digitalWrite(BrakePin, LOW);
-  pinMode(LedRPin, OUTPUT);
-    digitalWrite(LedRPin, LOW);
-  // pinMode(LedGPin, OUTPUT);
-  //   digitalWrite(LedGPin, HIGH);
-  pinMode(LedBPin, OUTPUT);
-    digitalWrite(LedBPin, LOW);
-
-  pinMode(AZtwoWirePin, OUTPUT);
-    digitalWrite(AZtwoWirePin, LOW);
-  pinMode(AZpreampPin, OUTPUT);
-    digitalWrite(AZpreampPin, LOW);
-
   // Listen source
   if (!EEPROM.begin(EEPROM_SIZE)){
     if(EnableSerialDebug>0){
@@ -691,18 +415,10 @@ void setup() {
   }
 
 
-  SERIAL1_BAUDRATE=EEPROM.readInt(14);
-  SerialServerIPport=EEPROM.readInt(18);
-  IncomingSwitchUdpPort=EEPROM.readInt(22);
-  BroadcastPort=IncomingSwitchUdpPort;
   OutputWatchdog=EEPROM.readUInt(30);
   if(OutputWatchdog>10080){
     OutputWatchdog=0;
   }
-  TelnetServerClientAuth[0]=EEPROM.readByte(37);
-  TelnetServerClientAuth[1]=EEPROM.readByte(38);
-  TelnetServerClientAuth[2]=EEPROM.readByte(39);
-  TelnetServerClientAuth[3]=EEPROM.readByte(40);
 
   // YOUR_CALL
   // move after ETH init
@@ -754,7 +470,6 @@ void setup() {
     }
   #endif
     server.begin();
-    UdpCommand.begin(IncomingSwitchUdpPort);    // incoming udp port
     // chipid=ESP.getEfuseMac();//The chip ID is essentially its MAC address(length: 6 bytes).
     //   unsigned long long1 = (unsigned long)((chipid & 0xFFFF0000) >> 16 );
     //   unsigned long long2 = (unsigned long)((chipid & 0x0000FFFF));
@@ -828,7 +543,6 @@ void setup() {
 
   //init and get the time
    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-   RainCountDayOfMonth=UtcTime(2);
 
    // ajax
    ajaxserver.on("/set", handleSet);
@@ -912,8 +626,8 @@ void Watchdog(){
     esp_task_wdt_reset();
     WdtTimer=millis();
     if(EnableSerialDebug>0){
-      Prn(3, 0,"WDT reset ");
-      Prn(3, 1, UtcTime(1));
+      Prn(0,"WDT reset ");
+      Prn(1, UtcTime(1));
     }
   }
 
@@ -935,70 +649,41 @@ void Watchdog(){
   }
   #endif
 
-  if(!TelnetServerClients[0].connected() && FirstListCommands==false){
-    FirstListCommands=true;
-  }
 }
 
 //-------------------------------------------------------------------------------------------------------
 void CLI2(){
-  int OUT=2;
+  static int incomingByte = 0;
+
   if (Serial.available() > 0) {
     incomingByte = Serial.read();
-    OUT = 0;
   }
   esp_task_wdt_reset();
   WdtTimer=millis();
 
   // ? H h
   if(incomingByte==63 || incomingByte==72 || incomingByte==104){
-    Prn(OUT, 1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
+    Prn(1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
 
   // CR/LF
   }else if(incomingByte==13||incomingByte==10){
-    // Prn(OUT, 1,"");
+    // Prn(1,"");
 
   // anykey
   }else{
-    // Prn(OUT, 0," [");
-    // Prn(OUT, 0, String(incomingByte) ); //, DEC);
-    // Prn(OUT, 1,"] unknown command");
+    // Prn(0," [");
+    // Prn(0, String(incomingByte) ); //, DEC);
+    // Prn(1,"] unknown command");
   }
   incomingByte=0;
 }
 
 
 //-------------------------------------------------------------------------------------------------------
-void Prn(int OUT, int LN, String STR){
-  if(OUT==3){
-    if(TelnetAuthorized==true){
-      OUT=1;
-    }else{
-      OUT=0;
-    }
-  }
-
-  if(OUT==0){
-    Serial.print(STR);
-    if(LN==1){
-      Serial.println();
-    }
-  }else if(OUT==1){
-    size_t len = STR.length()+1;
-    // uint8_t sbuf[len];
-    char sbuf[len];
-    STR.toCharArray(sbuf, len);
-    //push data to all connected telnet clients
-    for(i = 0; i < MAX_SRV_CLIENTS; i++){
-      if (TelnetServerClients[i] && TelnetServerClients[i].connected()){
-        TelnetServerClients[i].write(sbuf, len);
-        // delay(1);
-        if(LN==1){
-          TelnetServerClients[i].write(13); // CR
-          TelnetServerClients[i].write(10); // LF
-        }
-      }
-    }
+void Prn(int LN, String STR){
+  Serial.print(STR);
+  if(LN==1){
+    Serial.println();
   }
 }
 
@@ -1211,7 +896,6 @@ void http(){
     webClient.stop();
    if(EnableSerialDebug>0){
      Serial.println("WIFI webClient disconnected");
-     MeasureTimer[0]=millis()+5000-MeasureTimer[1];
    }
   }
 }
@@ -1275,10 +959,10 @@ void EthEvent(WiFiEvent_t event)
            // // charbuf[6] = 0;
           if(MQTT_LOGIN == true){
             if (mqttClient.connect(MACchar,MQTT_USER.c_str(),MQTT_PASS.c_str())){
-              Prn(0, 1, String(MACchar));
+              Prn(1, String(MACchar));
               mqttReconnect();
               AfterMQTTconnect();
-              Prn(0, 1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
+              Prn(1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
               if(BaudRate!=115200){
                 MqttPubString("USB-BaudRate", String(BaudRate), true);
                 Serial.println("Baudrate change to "+String(BaudRate)+"...");
@@ -1290,15 +974,15 @@ void EthEvent(WiFiEvent_t event)
                 Serial.println();
                 Serial.println();
                 Serial.println("New Baudrate "+String(BaudRate));
-                Prn(0, 1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
+                Prn(1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
               }
             }
           }else{
             if (mqttClient.connect(MACchar)){
-              Prn(0, 1, String(MACchar));
+              Prn(1, String(MACchar));
               mqttReconnect();
               AfterMQTTconnect();
-              Prn(0, 1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
+              Prn(1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
               if(BaudRate!=115200){
                 MqttPubString("USB-BaudRate", String(BaudRate), true);
                 Serial.println("Baudrate change to "+String(BaudRate)+"...");
@@ -1310,7 +994,7 @@ void EthEvent(WiFiEvent_t event)
                 Serial.println();
                 Serial.println();
                 Serial.println("New Baudrate "+String(BaudRate));
-                Prn(0, 1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
+                Prn(1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
               }
             }
           }
@@ -1341,7 +1025,7 @@ void Mqtt(){
       if (now - lastMqttReconnectAttempt > 5000) {
         lastMqttReconnectAttempt = now;
         if(EnableSerialDebug>0){
-          Prn(3, 1, "Attempt to MQTT reconnect | "+String(millis()/1000) );
+          Prn(1, "Attempt to MQTT reconnect | "+String(millis()/1000) );
         }
         if (mqttReconnect()) {
           lastMqttReconnectAttempt = 0;
@@ -1358,7 +1042,7 @@ void Mqtt(){
 //-------------------------------------------------------------------------------------------------------
 
 bool mqttReconnect() {
-  // Prn(3, 0, "MQTT");
+  // Prn(0, "MQTT");
   char charbuf[50];
   // // memcpy( charbuf, ETH.macAddress(), 6);
   // ETH.macAddress().toCharArray(charbuf, 18);
@@ -1366,14 +1050,14 @@ bool mqttReconnect() {
   if(MQTT_LOGIN == true){
     if (mqttClient.connect(MACchar,MQTT_USER.c_str(),MQTT_PASS.c_str())){
       if(EnableSerialDebug>0){
-        Prn(3, 0, "mqttReconnect-connected");
+        Prn(0, "mqttReconnect-connected");
       }
       reSubscribe();
     }
   }else{
     if (mqttClient.connect(MACchar)) {
       if(EnableSerialDebug>0){
-        Prn(3, 0, "mqttReconnect-connected");
+        Prn(0, "mqttReconnect-connected");
       }
       // IPAddress IPlocalAddr = ETH.localIP();                           // get
       // String IPlocalAddrString = String(IPlocalAddr[0]) + "." + String(IPlocalAddr[1]) + "." + String(IPlocalAddr[2]) + "." + String(IPlocalAddr[3]);   // to string
@@ -1390,28 +1074,28 @@ void reSubscribe(){
     const char *cstr = topic.c_str();
     if(mqttClient.subscribe(cstr)==true){
       if(EnableSerialDebug>0){
-        Prn(3, 1, " > subscribe "+String(cstr));
+        Prn(1, " > subscribe "+String(cstr));
       }
     }
     topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/get";
     const char *cstr1 = topic.c_str();
     if(mqttClient.subscribe(cstr1)==true){
       if(EnableSerialDebug>0){
-        Prn(3, 1, " > subscribe "+String(cstr1));
+        Prn(1, " > subscribe "+String(cstr1));
       }
     }
     topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/stop";
     const char *cstr2 = topic.c_str();
     if(mqttClient.subscribe(cstr2)==true){
       if(EnableSerialDebug>0){
-        Prn(3, 1, " > subscribe "+String(cstr2));
+        Prn(1, " > subscribe "+String(cstr2));
       }
     }
     topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/RxAzimuth";
     const char *cstr3 = topic.c_str();
     if(mqttClient.subscribe(cstr3)==true){
       if(EnableSerialDebug>0){
-        Prn(3, 1, " > subscribe "+String(cstr3));
+        Prn(1, " > subscribe "+String(cstr3));
       }
     }
 }
@@ -1424,7 +1108,7 @@ void MqttRx(char *topic, byte *payload, unsigned int length) {
   memcpy(p,payload,length);
   // static bool HeardBeatStatus;
   if(EnableSerialDebug>0){
-    Prn(3, 0, "RX MQTT ");
+    Prn(0, "RX MQTT ");
   }
 
     // // RxAzimuth
@@ -1442,7 +1126,7 @@ void MqttRx(char *topic, byte *payload, unsigned int length) {
     //   if(AZsource == 2){ //MQTT
     //     Azimuth=RxAzimuth;
     //   }
-    //     Prn(3, 1, "/RxAzimuth " + String(RxAzimuth));
+    //     Prn(1, "/RxAzimuth " + String(RxAzimuth));
     // }
 
 } // MqttRx END
@@ -1472,8 +1156,6 @@ void AfterMQTTconnect(){
           Serial.print(" ");
           Serial.println(MACchar);
 
-    // MeasureTimer[0]=2800000;
-    MeasureTimer[0]=millis()-MeasureTimer[1];
 
   #endif
 }
