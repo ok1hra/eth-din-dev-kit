@@ -34,19 +34,17 @@ mosquitto_pub -h 54.38.157.134 -t BD:2F/0/Target -m '10'
 mosquitto_pub -h 54.38.157.134 -t 3D:D3/0/RxAzimuth -m '10'
 
 TODO
-- infrared photo
 - rs485/mqtt proxy
 - gpio to mqtt report
 - mqtt to gpio control
 - ds18b20 resolution to setup
 - change prn() to debug.. if usb connected
-- #define OTAWEB                      // enable upload firmware via web
-
-
-
+- temperature Farnhait switch
 
 Changelog:
 - detect and read T1 and T2 termistor and public to MQTT every 20s
+- websocket IP port for mqtt-wall add to setup page
+
 
 IDE 1.8.19
 Using library OneWire at version 2.3.8 in folder: /home/dan/Arduino/libraries/OneWire 
@@ -66,7 +64,7 @@ Using library PubSubClient at version 2.8 in folder: /home/dan/Arduino/libraries
 Using library Wire at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Wire 
 */
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20250423";
+const char* REV = "20250424";
 
 // USED
 const int HWidPin          = 34;  // analog
@@ -112,6 +110,7 @@ String HTTP_req;
 long lastMqttReconnectAttempt = 0;
 boolean MQTT_ENABLE     = 1;          // enable public to MQTT broker
 int MQTT_PORT;       // MQTT broker PORT
+int WS_MQTT_PORT;       // websocket MQTT broker PORT - only for connection mqtt-wall web client
 boolean MQTT_LOGIN      = 0;          // enable MQTT broker login
 String MQTT_USER= "";    // MQTT broker user login
 String MQTT_PASS= "";   // MQTT broker password
@@ -159,6 +158,7 @@ static bool eth_connected = false;
   161-164 - MQTT broker IP
   165-166 - MQTT_PORT
   168 - MQTT_LOGIN
+  169-170 - WS_MQTT_PORT
   226-227 BaudRate
   236-245 - MQTT_USER
   246-265 - MQTT_PASS
@@ -353,10 +353,16 @@ void setup() {
     mqtt_server_ip[3]=EEPROM.readByte(164);
   }
 
-  if(EEPROM.read(164)==0xff){
+  if(EEPROM.read(165)==0xff){
     MQTT_PORT=1883;
   }else{
     MQTT_PORT = EEPROM.readUShort(165);
+  }
+
+  if(EEPROM.read(169)==0xff){
+    WS_MQTT_PORT=1884;
+  }else{
+    WS_MQTT_PORT = EEPROM.readUShort(169);
   }
 
   #if defined(ETHERNET)
@@ -599,7 +605,9 @@ void http(){
           webClient.print(mqtt_server_ip[2]);
           webClient.print(F("."));
           webClient.print(mqtt_server_ip[3]);
-          webClient.println(":1884/\",");
+          webClient.print(":");
+          webClient.print(WS_MQTT_PORT);
+          webClient.println("/\",");
           if(MQTT_LOGIN==true){
             webClient.print(F("                  username: \""));
             webClient.print(String(MQTT_USER));
@@ -682,7 +690,7 @@ void http(){
             webClient.println(ETH.localIP());
             webClient.print(F(":82/update\" target=_blank>Upload&nbsp;FW</a>&nbsp;| <a href=\"https://github.com/ok1hra/eth-din-dev-kit/releases\" target=_blank>Releases</a><br><a href=\"http://"));
             webClient.println(ETH.localIP());
-            webClient.print(F(":88/set\" onclick=\"window.open( this.href, this.href, 'width=620,height=570,left=0,top=0,menubar=no,location=no,status=no' ); return false;\"><button style='color: #fff; background-color: #060; padding: 5px 20px 5px 20px; margin:15px; border: none; -webkit-border-radius: 5px; -moz-border-radius: 5px; border-radius: 5px;} :hover {background-color: orange;} '>SETUP</button></a>"));
+            webClient.print(F(":88/set\" onclick=\"window.open( this.href, this.href, 'width=620,height=650,left=0,top=0,menubar=no,location=no,status=no' ); return false;\"><button style='color: #fff; background-color: #060; padding: 5px 20px 5px 20px; margin:15px; border: none; -webkit-border-radius: 5px; -moz-border-radius: 5px; border-radius: 5px;} :hover {background-color: orange;} '>SETUP</button></a>"));
           #endif
           // END STATUS
           webClient.println(F("              </p>"));
@@ -1072,6 +1080,7 @@ void handleSet() {
   String rotidERR= "";
   String mqttERR= "";
   String mqttportERR= "";
+  String wsmqttportERR= "";
   String baudSELECT0= "";
   String baudSELECT1= "";
   String baudSELECT2= "";
@@ -1285,6 +1294,19 @@ void handleSet() {
       }
     }
 
+    // 169-170 - WS_MQTT_PORT
+    if ( ajaxserver.arg("wsmqttport").length()<1 || ajaxserver.arg("wsmqttport").toInt()<1 || ajaxserver.arg("wsmqttport").toInt()>65535){
+      wsmqttportERR= " Out of range number 1-65535";
+    }else{
+      if(WS_MQTT_PORT == ajaxserver.arg("wsmqttport").toInt()){
+        wsmqttportERR="";
+      }else{
+        wsmqttportERR=" Warning: websocket MQTT broker PORT has changed.";
+        WS_MQTT_PORT = ajaxserver.arg("wsmqttport").toInt();
+        EEPROM.writeUShort(169, WS_MQTT_PORT);
+      }
+    }
+
     // 168 - MQTT_LOGIN
     if(ajaxserver.arg("mqtt_login").toInt()==1 && MQTT_LOGIN==false){
       MQTT_LOGIN = true;
@@ -1296,6 +1318,9 @@ void handleSet() {
       MqttPubString("MQTToginEnable", String(MQTT_LOGIN), true);
     }
     EEPROM.commit();
+    Serial.println("Interface will be restarted...");
+    delay(3000);
+    ESP.restart();
   } // else form valid
 
 if(MQTT_LOGIN==true){
@@ -1404,7 +1429,13 @@ switch (BaudRate) {
     HtmlSrc += mqtt_passERR;
     HtmlSrc +="</span><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Login Password max 20 character, for connect to MQTT broker</span></span></td></tr>\n";
 
-  HtmlSrc +="<tr class='b'><td class='tdr'></td><td><button id='go'>&#10004; Change</button></form>&nbsp; ";
+  HtmlSrc +="<tr><td class='tdr'><label for='mqttport'>websocet MQTT PORT:</label></td><td>";
+  HtmlSrc +="<input type='text' id='wsmqttport' name='wsmqttport' size='2' value='" + String(WS_MQTT_PORT) + "'>\n";
+  HtmlSrc +="<span style='color:red;'>";
+  HtmlSrc += wsmqttportERR;
+  HtmlSrc +="</span><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>websocket MQTT broker PORT - only for connection mqtt-wall web client. Default 1884</span></span></td></tr>\n";
+    
+  HtmlSrc +="<tr class='b'><td class='tdr'></td><td><button id='go'>&#10004; Change & Restart</button></form>&nbsp; ";
   HtmlSrc +="</td></tr>\n";
 
   // HtmlSrc +="<tr><td class='tdr'></td><td style='height: 42px;'></td></tr>\n";
