@@ -4,7 +4,7 @@
 - Connectors (T1 and T2) for connecting two DS18B20 digital thermistors with automatic detection. Reading temperature every 20 seconds and sending to MQTT with topic /T1-Celsius
 - Ethernet connection using RJ45 connector with IP address retrieval from DHCP server. Static IP address setting is not implemented
 - http web server publishing two pages
-    - mqtt-wall, which is a web MQTT client, for displaying messages that the device has sent to the MQTT broker
+    - [mqtt-wall](https://github.com/bastlirna/mqtt-wall) , which is a web MQTT client, for displaying messages that the device has sent to the MQTT broker
     - SETUP page for configuring the device contains settings
         - MQTT topic
         - Device ID
