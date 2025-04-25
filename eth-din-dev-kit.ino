@@ -418,7 +418,8 @@ void loop() {
   #if defined(OTAWEB)
    AsyncElegantOTA.loop();
   #endif
-  // SPACE FOR YOUR CODE
+  
+  // SPACE FOR YOUR CODE...
 
 
 
@@ -708,7 +709,7 @@ void http(){
           webClient.println(F("                      <code id=\"status-state\" class=\"connecting\"><em>&bull;</em> <span>connecting...</span></code> to "));
           webClient.println(F("                      <code id=\"status-host\">?</code>"));
           webClient.println(F("                      <em>via</em> MQTT Wall 0.3.0 (<a href=\"https://github.com/bastlirna/mqtt-wall\">github</a>)"));
-          webClient.println(F("                      | <a href=\"https://remoteqth.com/w/\" target=\"_blank\">ROT Wiki</a>."));
+          webClient.println(F("                      | <a href=\"https://remoteqth.com/w/\" target=\"_blank\">Wiki</a>."));
           webClient.println(F("                  </p>"));
           webClient.println(F("              </div>"));
           webClient.println(F("          </div>"));

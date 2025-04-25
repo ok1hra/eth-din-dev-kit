@@ -1,7 +1,7 @@
 # eth-din-dev-kit
 
 ## Implemented functions
-- Connectors (T1 and T2) for connecting two DS18B20 digital thermistors with automatic detection. Reading temperature every 20 seconds and sending to MQTT with topic /T1-Celsius
+- Connectors (T1 and T2) for connecting two [DS18B20 digital thermistors](https://www.laskakit.cz/en/dallas-ds18b20-orig--digitalni-vodotesne-cidlo-teploty-1m/) with automatic detection. Reading temperature every 20 seconds and sending to MQTT with topic /T1-Celsius
 - Ethernet connection using RJ45 connector with IP address retrieval from DHCP server. Static IP address setting is not implemented
 - http web server publishing two pages
     - [mqtt-wall](https://github.com/bastlirna/mqtt-wall) , which is a web MQTT client, for displaying messages that the device has sent to the MQTT broker
@@ -19,3 +19,36 @@
 - MQTT client for sending and receiving messages from the broker
 - Measuring POE voltage and sending the value to MQTT when it changes
 - Watchdog timer, triggers a device restart if the firmware stops for longer than 60s
+
+## Mechanical and electrical properties
+- Mounting on DIN rail TS35 (35mm)
+- Module width 19.5mm
+- Four LEDs
+    - Fail internal fuse - red (top)
+    - 100M ethernet - green
+    - ACT ethernet - green
+    - PWR - green (bottom)
+- Single board PCB contains interfaces
+    - Ethernet connector RJ45, with passive POE accept 9-13.8V DC, any polarity on pin 4+5 (one polarity) and 7+8 (second polarity)
+    - DC power jack 5.5/2.5mm, accept 9-13.8V DC, center positive
+    - USB-C connector contains
+        - 5V power input for electronic
+        - serial comunications with ESP32 cpu
+        - 3.3V I2C bus - Gpio33 (SDA) on SBU1, Gpio32(SCL) on SBU2
+    - RS485 bus on 39512-1002 connector - B signal on pin 1
+    - Two 3.3V one wire bus on S3B-XH-A(LF)(SN) connectors - pin1 +3.3V, pin2 oneWire, pin3 GND
+    - GPIO piheader socket 2x10
+        1,2 - +12V (max 400mA)
+        3,4,19,20 - GND
+        6 - 3.3V (max 500mA)
+        5 - Gpio5
+        7 - Gpio33 (SDA/SBU1)
+        8 - Gpio15
+        9 - Gpio12
+        10 - Gpio14
+        11 - Gpio2
+        12 - Gpio13
+        13 - Gpio4
+        14 - Gpio0
+        15 - Gpi39
+        16 - Gpio16
