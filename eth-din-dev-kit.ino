@@ -44,6 +44,10 @@ TODO
 Changelog:
 - detect and read T1 and T2 termistor and public to MQTT every 20s
 - websocket IP port for mqtt-wall add to setup page
+- Analog read Gpi39 voltage to mqtt
+- detect USB-C plug and publish to MQTT with topic /USBdetect
+- received RS485 data forward to MQTT with topic /RS485_RX
+
 
 
 IDE 1.8.19
@@ -64,16 +68,15 @@ Using library PubSubClient at version 2.8 in folder: /home/dan/Arduino/libraries
 Using library Wire at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Wire 
 */
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20250424";
+const char* REV = "20250510";
 
 // USED
 const int HWidPin          = 34;  // analog
 const int VoltagePoePin    = 35;  // analog
 const int TermistorT1Pin   =  5;  // one wire
-
 const int TermistorT2Pin   = 15;  // one wire
 const int RS485ReDePin     = 16;  // out
-const int USBdetectPin     = 36;  // in
+const int USBdetectPin     = 36;  // digital in
 
 // FREE GPIO
 const int Gpi39Pin         = 39;  // analog in
@@ -83,9 +86,11 @@ const int Gpio14Pin        = 14;  // in/out
 const int Gpio13Pin        = 13;  // in/out
 const int Gpio12Pin        = 12;  // in/out
 const int Gpio4Pin         =  4;  // in/out
+const int Gpio2Pin         =  2;  // in/out (RTS)
 const int Gpio0Pin         =  0;  // in/out (RTS)
 
 // Variables
+bool USBdetect = false;
 short HardwareRev = 99;
 String YOUR_CALL = "";
 String NET_ID = "";
@@ -95,6 +100,7 @@ float T2Celsius = 0;
 String MACString;
 char MACchar[18];
 float VoltagePOE      = 0.0;
+float VoltageGpi39      = 0.0;
 long WdtTimer=0;
 int BaudRate = 115200; // serial debug baudrate
 int EnableSerialDebug     = 0;
@@ -213,15 +219,18 @@ void setup() {
   Serial.println("----------------------------");
   pinMode(HWidPin, INPUT);
     HWidValue = readADC_Cal(analogRead(HWidPin));
-    if(HWidValue<=200){
+    if(HWidValue<=375){
       HardwareRev=0;  // 162
-    }else if(HWidValue>200 && HWidValue<=450){
-      HardwareRev=1;  // ??
+    }else if(HWidValue>375 && HWidValue<=800){
+      HardwareRev=1;  // 588
     }
   Serial.println("HW   "+String(HardwareRev));
   Serial.println("FW   "+String(REV));
   
   pinMode(VoltagePoePin, INPUT);
+  pinMode(Gpi39Pin, INPUT);
+  pinMode(USBdetectPin, INPUT);
+  pinMode(RS485ReDePin, OUTPUT);
 
   #if defined(DS18B20)
     sensors1.begin();
@@ -418,7 +427,7 @@ void loop() {
   #if defined(OTAWEB)
    AsyncElegantOTA.loop();
   #endif
-  
+
   // SPACE FOR YOUR CODE...
 
 
@@ -453,26 +462,69 @@ uint32_t readADC_Cal(int ADC_Raw)
 //-------------------------------------------------------------------------------------------------------
 void Watchdog(){
   static float VoltageBuffer = 0;
+  static float VoltageBufferGpi39 = 0;
   static long ADCTimer = 0;
   static long ADCCounter = 0;
   static long OneWireTimer = 0;
+  static long RS485beaconTimer = 0;
   if(millis()-ADCTimer > 5){
     // R divider | 12,95/2,95=4,38983050847458
     VoltageBuffer = VoltageBuffer + readADC_Cal(analogRead(VoltagePoePin))/1000.0*4.39;
+    VoltageBufferGpi39 = VoltageBufferGpi39 + readADC_Cal(analogRead(Gpi39Pin))/1000.0; //*4.39;
     ADCCounter ++;
     if(ADCCounter > 34){
       VoltagePOE = VoltageBuffer/35;
+      VoltageGpi39 = VoltageBufferGpi39/35;
       ADCCounter = 0;
       VoltageBuffer = 0;
+      VoltageBufferGpi39 = 0;
     }
     ADCTimer=millis();
   }
 
+  if(digitalRead(USBdetectPin) != USBdetect){
+    USBdetect = !USBdetect;
+    MqttPubString("USBdetect", String(USBdetect), false);
+  }
+
+  // RS485 beacon
+  // if(millis() - RS485beaconTimer > 1000){
+  //   if(USBdetect == false){
+  //     digitalWrite(RS485ReDePin, HIGH);
+  //     // delay(1);
+  //     Serial.println(String(millis()));
+  //     Serial.flush();
+  //     digitalWrite(RS485ReDePin, LOW);
+  //     // delay(1);
+  //   }
+  //   RS485beaconTimer=millis();
+  // }
+
+  // RS485 to MQTT
+  String RXstring;
+  if(USBdetect == false){
+    if (Serial.available()) {
+      RXstring = Serial.readStringUntil('\n');
+      MqttPubString("RS485_RX", RXstring, false);
+    }
+  }
+
   static float VoltagePOETmp = 0;
-  // info if change voltage
-  if(abs(VoltagePOETmp-VoltagePOE)>0.5){
+  static float VoltagePOETimer = 0;
+  // info if change POE voltage
+  if(abs(VoltagePOETmp-VoltagePOE)>0.5 || millis() - VoltagePOETimer > 20000){
     MqttPubString("VoltagePOE", String(VoltagePOE), false);
     VoltagePOETmp=VoltagePOE;
+    VoltagePOETimer=millis();
+  }
+
+  static float VoltageGpi39Tmp = 0;
+  static float VoltageGpi39Timer = 0;
+  // info if change GPII39 voltage
+  if(abs(VoltageGpi39Tmp-VoltageGpi39)>0.5 || millis() - VoltageGpi39Timer > 20000){
+    MqttPubString("VoltageGpi39", String(VoltageGpi39), false);
+    VoltageGpi39Tmp=VoltageGpi39;
+    VoltageGpi39Timer=millis();
   }
 
   // WDT
