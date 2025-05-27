@@ -1,11 +1,18 @@
 # EMS OK1HRA - Dan Pech https://remoteqth.com/w/doku.php?id=din-module-sb&s%5B%5D=solarbeam$0
-# Template OK1BT - Tomáš Břinčil
+# Template OK1BT - Tomáš Břinčil https://github.com/ok1hra/eth-din-dev-kit/edit/main/esphome-solarbeam-version.yaml
 
 esphome:
-  name: esphome-ems-ng-1
+  name: esphome-web-ab7e4c
   friendly_name: SOLARBEAM EMS NG - 1
   min_version: 2025.5.0
   name_add_mac_suffix: false
+  on_boot:
+    priority: -10
+    then:
+      - output.turn_on: ssr
+      - output.set_level:
+          id: ssr
+          level: "50%"
 
 esp32:
   board: esp32dev
@@ -31,7 +38,7 @@ wifi:
 
   # Fallback hotspot
   ap:
-    ssid: "AP"
+    ssid: "EMS NG"
     password: "12345678"
 
 # B
@@ -52,11 +59,33 @@ sensor:
     name: t1
     update_interval: 10s
 
+# 200ms - https://solarforum.cz/viewtopic.php?p=41415&sid=8c5b58f97279da9a0c13449c3744cdb1#p41415$0
+# 5ms, píšou 200 Hz na str.66 https://solarcontrols.cz/archives/eshop/WATTrouterECO_CZ_1_5.pdf$0
+# 10 ms  https://forum.mypower.cz/viewtopic.php?t=1036&start=40#p40315$0
+output:
+  - platform: slow_pwm
+    pin: GPIO12
+    id: ssr
+    period: 200ms # https://solarforum.cz/viewtopic.php?p=41415&sid=8c5b58f97279da9a0c13449c3744cdb1#p41415$0
+    zero_means_zero: true
+    inverted: false
+
+number:
+  - platform: template
+    name: SSR
+    optimistic: true
+    initial_value: 0
+    min_value: 0
+    max_value: 1
+    step: 0.01
+    mode: slider
+    on_value:
+      - output.set_level:
+          id: ssr
+          level: !lambda |-
+            return x;
 
 switch:
-  - platform: gpio
-    pin: GPIO12
-    name: "SSR"
   - platform: gpio
     pin: GPIO13
     name: "STYKAC1"
