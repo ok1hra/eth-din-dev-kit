@@ -1,0 +1,65 @@
+# EMS OK1HRA - Dan Pech https://remoteqth.com/w/doku.php?id=din-module-sb&s%5B%5D=solarbeam$0
+# Template OK1BT - Tomáš Břinčil
+
+esphome:
+  name: esphome-ems-ng-1
+  friendly_name: SOLARBEAM EMS NG - 1
+  min_version: 2025.5.0
+  name_add_mac_suffix: false
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+
+ota:
+- platform: esphome
+
+web_server:
+  port: 80
+
+# ESPHome neumi s ESP32 zaroven wifi a eth. Vyber WiFi (A) nebo ethernet (B)
+
+# A
+wifi:
+  ssid: "ssid"
+  password: "heslo"
+
+  # Fallback hotspot
+  ap:
+    ssid: "AP"
+    password: "12345678"
+
+# B
+#ethernet:
+#  type: LAN8720
+#  mdc_pin: GPIO23
+#  mdio_pin: GPIO18
+#  clk_mode: GPIO17_OUT
+#  phy_addr: 0
+
+one_wire:
+  - platform: gpio
+    pin: GPIO15
+
+sensor:
+  - platform: dallas_temp
+    address: 0x5a00001072aad528
+    name: t1
+    update_interval: 10s
+
+
+switch:
+  - platform: gpio
+    pin: GPIO12
+    name: "SSR"
+  - platform: gpio
+    pin: GPIO13
+    name: "STYKAC1"
+  - platform: gpio
+    pin: GPIO14
+    name: "STYKAC2"
