@@ -1,0 +1,426 @@
+esphome:
+  name: esphome-web-ab7e4c
+  friendly_name: SOLARBEAM EMS NG - 1
+  min_version: 2025.5.0
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -10
+    then:
+      - output.turn_on: ssr
+      - output.set_level:
+          id: ssr
+          level: 0.0
+      - climate.control:
+          id: solar_pid
+          mode: HEAT
+      - climate.control:
+          id: water_heater_pid
+          mode: HEAT
+      - climate.control:
+          id: battery_pid
+          mode: HEAT
+      - climate.control:
+          id: battery_soc_pid
+          mode: COOL
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+
+wifi:
+  ssid: ""
+  password: ""
+  ap:
+    ssid: "EMS NG"
+    password: "12345678"
+
+one_wire:
+  - platform: gpio
+    pin: GPIO15
+
+globals:
+  - id: pid_mode
+    type: int
+    initial_value: '0'  # 0 = Thermostat, 1 = Grid, 2 = Battery, 3 = SOC
+
+output:
+  - platform: slow_pwm
+    pin: GPIO12
+    id: ssr
+    period: 207ms
+    zero_means_zero: true
+    inverted: false
+
+  - platform: template
+    id: solar_pid_output
+    type: float
+    write_action:
+      - lambda: |-
+          if (id(pid_mode) == 1) {
+            float value = state;
+            value = std::min(std::max(value, 0.0f), 1.0f);
+            id(total_power).publish_state(value);
+          }
+
+  - platform: template
+    id: water_heater_pid_output
+    type: float
+    write_action:
+      - lambda: |-
+          if (id(pid_mode) == 0) {
+            float value = state;
+            value = std::min(std::max(value, 0.0f), 1.0f);
+            id(total_power).publish_state(value);
+          }
+
+  - platform: template
+    id: battery_pid_output
+    type: float
+    write_action:
+      - lambda: |-
+          if (id(pid_mode) == 2) {
+            float value = state;
+            value = std::min(std::max(value, 0.0f), 1.0f);
+            id(total_power).publish_state(value);
+          }
+
+  - platform: template
+    id: battery_soc_pid_output
+    type: float
+    write_action:
+      - lambda: |-
+          if (id(pid_mode) == 3) {
+            float value = state;
+            value = std::min(std::max(value, 0.0f), 1.0f);
+            id(total_power).publish_state(value);
+          }
+
+number:
+  - platform: template
+    name: "POWER OUT"
+    id: total_power
+    min_value: 0.0
+    max_value: 1.0
+    step: 0.01
+    mode: slider
+    optimistic: true
+    initial_value: 0.0
+    on_value:
+      - lambda: |-
+          float per_phase = 1.0 / 3.0;
+          float ssr_level = 0.0;
+
+          if (x < per_phase) {
+            ssr_level = x / per_phase;
+            id(stykac1).turn_off();
+            id(stykac2).turn_off();
+          } else if (x < 2 * per_phase) {
+            ssr_level = (x - per_phase) / per_phase;
+            id(stykac1).turn_on();
+            id(stykac2).turn_off();
+          } else {
+            ssr_level = (x - 2 * per_phase) / per_phase;
+            id(stykac1).turn_on();
+            id(stykac2).turn_on();
+          }
+
+          id(ssr).set_level(ssr_level);
+
+          if (id(t1).state > 95.0) {
+            id(ssr).set_level(0.0);
+            id(stykac1).turn_off();
+            id(stykac2).turn_off();
+          }
+
+  - platform: template
+    name: "POWER GRID"
+    id: grid_value
+    min_value: -15000
+    max_value: 15000
+    step: 1
+    mode: slider
+    optimistic: true
+    initial_value: 0
+
+  - platform: template
+    name: "CONSUMPTION OUT"
+    id: prikon_value
+    min_value: 0
+    max_value: 6000
+    step: 1
+    mode: slider
+    optimistic: true
+    initial_value: 3000
+
+  - platform: template
+    name: "POWER BAT"
+    id: battery_value
+    min_value: -15000
+    max_value: 15000
+    step: 1
+    mode: slider
+    optimistic: true
+    initial_value: 0
+
+  - platform: template
+    name: "SOC BAT"
+    id: battery_soc_value
+    min_value: 0
+    max_value: 100
+    step: 0.01
+    mode: slider
+    optimistic: true
+    initial_value: 0
+
+sensor:
+  - platform: dallas_temp
+    address: 0x5a00001072aad528
+    name: "T1"
+    id: t1
+    update_interval: 10s
+
+  - platform: template
+    name: "Sensor GRID"
+    id: grid_sensor
+    lambda: |-
+      return id(grid_value).state;
+    update_interval: 2s
+
+  - platform: template
+    name: "Sensor BATT"
+    id: battery_sensor
+    lambda: |-
+      return id(battery_value).state;
+    update_interval: 2s
+
+  - platform: template
+    name: "Sensor BATT SOC"
+    id: battery_soc_sensor
+    lambda: |-
+      return id(battery_soc_value).state;
+    update_interval: 2s
+
+switch:
+  - platform: gpio
+    pin: GPIO13
+    name: "Stykač 1 (L2)"
+    id: stykac1
+
+  - platform: gpio
+    pin: GPIO14
+    name: "Stykač2 (L3)"
+    id: stykac2
+
+  - platform: template
+    name: "Režim: TEMP"
+    id: pid_mode_thermostat
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(pid_mode) = 0;
+      - switch.turn_off: pid_mode_grid
+      - switch.turn_off: pid_mode_battery
+      - switch.turn_off: pid_mode_battery_soc
+
+  - platform: template
+    name: "Režim: GRID"
+    id: pid_mode_grid
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(pid_mode) = 1;
+      - switch.turn_off: pid_mode_thermostat
+      - switch.turn_off: pid_mode_battery
+      - switch.turn_off: pid_mode_battery_soc
+
+  - platform: template
+    name: "Režim: BATT"
+    id: pid_mode_battery
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(pid_mode) = 2;
+      - switch.turn_off: pid_mode_thermostat
+      - switch.turn_off: pid_mode_grid
+      - switch.turn_off: pid_mode_battery_soc
+
+  - platform: template
+    name: "Režim: SOC"
+    id: pid_mode_battery_soc
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(pid_mode) = 3;
+      - switch.turn_off: pid_mode_thermostat
+      - switch.turn_off: pid_mode_grid
+      - switch.turn_off: pid_mode_battery
+
+  - platform: template
+    name: "AUTOMAT GRID"
+    id: automat_grid
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    name: "AUTOMAT BATT"
+    id: automat_batt
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  
+button:
+  - platform: template
+    name: "PID TEMP Autotune"
+    on_press:
+      - climate.pid.autotune: water_heater_pid
+  - platform: template
+    name: "PID GRID Autotune"
+    on_press:
+      - climate.pid.autotune: solar_pid
+  - platform: template
+    name: "PID BAT Autotune"
+    on_press:
+      - climate.pid.autotune: battery_pid
+
+  - platform: template
+    name: "PID SOC Autotune"
+    on_press:
+      - climate.pid.autotune: battery_soc_pid
+
+climate:
+  - platform: pid
+    name: "PID GRID"
+    id: solar_pid
+    sensor: grid_sensor
+    default_target_temperature: 0.0
+    heat_output: solar_pid_output
+    visual:
+      min_temperature: -15000
+      max_temperature: 15000
+    control_parameters:
+      kp: 0.000001
+      ki: 0.00001
+      kd: 0.0000
+      min_integral: -1.0
+      max_integral: 1.0
+      output_averaging_samples: 1
+      derivative_averaging_samples: 1
+
+  - platform: pid
+    name: "PID TEMP"
+    id: water_heater_pid
+    sensor: t1
+    default_target_temperature: 55.0
+    heat_output: water_heater_pid_output
+    visual:
+      min_temperature: 20
+      max_temperature: 95
+    control_parameters:
+      kp: 0.33035
+      ki: 0.00038
+      kd: 71.20722
+      min_integral: -1.0
+      max_integral: 1.0
+      output_averaging_samples: 3
+      derivative_averaging_samples: 3
+
+  - platform: pid
+    name: "PID BAT"
+    id: battery_pid
+    sensor: battery_sensor
+    default_target_temperature: 0.0
+    heat_output: battery_pid_output
+    visual:
+      min_temperature: -15000
+      max_temperature: 15000
+    control_parameters:
+      kp: 0.000002
+      ki: 0.00001
+      kd: 0.000
+      min_integral: -1.0
+      max_integral: 1.0
+      output_averaging_samples: 1
+      derivative_averaging_samples: 1
+
+  - platform: pid
+    name: "PID SOC"
+    id: battery_soc_pid
+    sensor: battery_soc_sensor
+    default_target_temperature: 95
+    cool_output: battery_soc_pid_output
+    visual:
+      min_temperature: 0
+      max_temperature: 100
+    control_parameters:
+      kp: 0.010
+      ki: 0.0001
+      kd: 0.000
+      min_integral: -1.0
+      max_integral: 1.0
+      output_averaging_samples: 5
+      derivative_averaging_samples: 5
+
+interval:
+  - interval: 2s
+    then:
+      # Vzájemné blokování automatických režimů
+      - if:
+          condition:
+            switch.is_on: automat_batt
+          then:
+            - switch.turn_off: automat_grid
+      - if:
+          condition:
+            switch.is_on: automat_grid
+          then:
+            - switch.turn_off: automat_batt
+
+      # Automatický režim pro BATT
+      - if:
+          condition:
+            switch.is_on: automat_batt
+          then:
+            - lambda: |-
+                if (id(battery_soc_sensor).state < 98.0) {
+                  id(pid_mode_thermostat).turn_on();
+                } else if (id(pid_mode) == 0 && id(battery_soc_sensor).state >= 98.0) {
+                  id(pid_mode_battery).turn_on();
+                }
+
+      # Automatický režim pro GRID
+      - if:
+          condition:
+            switch.is_on: automat_grid
+          then:
+            - lambda: |-
+                if (id(battery_soc_sensor).state < 98.0) {
+                  id(pid_mode_thermostat).turn_on();
+                } else if (id(pid_mode) == 0 && id(battery_soc_sensor).state >= 98.0) {
+                  id(pid_mode_grid).turn_on();
+                }
+
+      # Vypni všechny režimy, pokud jsou oba automaty vypnuté
+      - if:
+          condition:
+            and:
+              - switch.is_off: automat_batt
+              - switch.is_off: automat_grid
+          then:
+            - switch.turn_off: pid_mode_thermostat
+            - switch.turn_off: pid_mode_grid
+            - switch.turn_off: pid_mode_battery
+            - switch.turn_off: pid_mode_battery_soc
