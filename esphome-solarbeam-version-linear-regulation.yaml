@@ -1,0 +1,320 @@
+esphome:
+  name: esphome-web-ab7e4c
+  friendly_name: SOLARBEAM EMS NG - 1
+  min_version: 2025.5.0
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -10
+    then:
+      # Po startu zapneme SSR na úroveň 0
+      - output.turn_on: ssr
+      - output.set_level:
+          id: ssr
+          level: 0.0
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+
+wifi:
+  ssid: ""
+  password: ""
+  ap:
+    ssid: "EMS NG"
+    password: "12345678"
+
+# ────────────── Globální proměnné ──────────────
+globals:
+  - id: pid_output_temp_value
+    type: float
+    initial_value: '0.0'   # dočasné uložení výstupu Termostatu
+  - id: reg_soc_value
+    type: float
+    initial_value: '0.0'   # dočasné uložení výstupu regulace SOC
+  - id: full_soc_reached
+    type: bool
+    initial_value: 'false' # flag: zda už bylo dosaženo 100 % SOC
+
+one_wire:
+  - platform: gpio
+    pin: GPIO15
+
+# ────────────── ČÍSELNÉ VSTUPY (uživatel upravuje) ──────────────
+number:
+  # 1) SOC (stav nabití baterie) – uživatel zadá 0…100 %
+  - platform: template
+    name: "SOC"
+    id: soc_value
+    min_value: 0.0
+    max_value: 100.0
+    step: 0.1
+    mode: box
+    optimistic: true
+    initial_value: 0.0
+
+  # 2) POWER OUT (výkon do bojleru, 0…1 odpovídá 0…100 %)
+  - platform: template
+    name: "POWER OUT"
+    id: total_power
+    min_value: 0.0
+    max_value: 1.0
+    step: 0.01
+    mode: slider
+    optimistic: true
+    initial_value: 0.0
+    on_value:
+      - lambda: |-
+          // Rozdělení hodnoty total_power do SSR + stykačů (třífázově)
+          float per_phase = 1.0f / 3.0f;
+          float x_val = x;
+          float ssr_lvl = 0.0f;
+          if (x_val < per_phase) {
+            ssr_lvl = x_val / per_phase;
+            id(stykac1).turn_off();
+            id(stykac2).turn_off();
+          } else if (x_val < 2 * per_phase) {
+            ssr_lvl = (x_val - per_phase) / per_phase;
+            id(stykac1).turn_on();
+            id(stykac2).turn_off();
+          } else {
+            ssr_lvl = (x_val - 2 * per_phase) / per_phase;
+            id(stykac1).turn_on();
+            id(stykac2).turn_on();
+          }
+          id(ssr).set_level(ssr_lvl);
+
+  # 3) SOC TRESHOLD (0…100 %): pokud SOC pod tuto hranici, vypne 100 % flag
+  - platform: template
+    name: "SOC TRESHOLD"
+    id: soc_threshold
+    min_value: 0.0
+    max_value: 100.0
+    step: 0.1
+    mode: slider
+    optimistic: true
+    initial_value: 90.0
+
+  # 4) SOC KEEP (cílové SOC pro regulaci)
+  - platform: template
+    name: "SOC KEEP"
+    id: soc_keep
+    min_value: 0.0
+    max_value: 100.0
+    step: 0.1
+    mode: slider
+    optimistic: true
+    initial_value: 95.0
+
+  # 5) SOC SPREAD (rozsah ± okolo SOC KEEP)
+  - platform: template
+    name: "SOC SPREAD"
+    id: soc_spread
+    min_value: 0.0
+    max_value: 2.0
+    step: 0.1
+    mode: slider
+    optimistic: true
+    initial_value: 1.0
+
+sensor:
+  # 1) Teplota vody (bojler) – Dallas senzor
+  - platform: dallas_temp
+    address: 0x5a00001072aad528
+    name: "TEMP"
+    id: temp
+    update_interval: 5s
+
+  # 2) SOC senzor – vrací hodnotu z čísla soc_value
+  - platform: template
+    name: "SOC"
+    id: soc_sensor
+    unit_of_measurement: "%"
+    update_interval: 2s
+    lambda: |-
+      return id(soc_value).state;
+    on_value:
+      then:
+        # Když SOC ≥ 100 %, nastavíme full_soc_reached = true
+        - if:
+            condition:
+              lambda: 'return x >= 100.0;'
+            then:
+              - globals.set:
+                  id: full_soc_reached
+                  value: 'true'
+        # Když SOC klesne pod nastavenou SOC_THRESHOLD, vypneme 100 % flag
+        - if:
+            condition:
+              lambda: 'return x < id(soc_threshold).state;'
+            then:
+              - switch.turn_off: soc_flag
+
+  # 3) SSR úroveň – zobrazíme hodnotu total_power (0…1)
+  - platform: template
+    name: "SSR Level"
+    id: ssr_level_sensor
+    unit_of_measurement: ""
+    update_interval: 1s
+    lambda: |-
+      return id(total_power).state;
+
+output:
+  # 1) SSR pro bojler (slow PWM)
+  - platform: slow_pwm
+    pin: GPIO12
+    id: ssr
+    period: 207ms
+    zero_means_zero: true
+    inverted: false
+
+  # 2) Výstup Termostatu (PID teplota)
+  - platform: template
+    id: pid_output_temp
+    type: float
+    write_action:
+      - lambda: |-
+          // Pokud je "Regulace podle teploty" zapnutá, použijeme signál z PID; jinak 0
+          if (id(pid_temp_enable).state) {
+            id(pid_output_temp_value) = state;
+          } else {
+            id(pid_output_temp_value) = 0.0f;
+          }
+          // Kombinujeme výstup Termostatu a regulace SOC – bere se max
+          float combined = std::max(id(pid_output_temp_value), id(reg_soc_value));
+          id(total_power).publish_state(combined);
+
+interval:
+  - interval: 2s
+    then:
+      - lambda: |-
+          // 2s loop: lineární regulace podle SOC
+          float soc = id(soc_sensor).state;
+          float keep = id(soc_keep).state;
+          float spread = id(soc_spread).state;
+
+          // Regulace platí jen pokud full_soc_reached == true a switch reg_soc_enable == ON
+          if (!id(full_soc_reached) || !id(reg_soc_enable).state) {
+            id(reg_soc_value) = 0.0f;
+          } else {
+            float low = keep - spread;
+            float high = keep + spread;
+            if (soc <= low) {
+              id(reg_soc_value) = 0.0f;
+            } else if (soc >= high) {
+              id(reg_soc_value) = 1.0f;
+            } else {
+              if (soc < keep) {
+                // v [keep-spread .. keep] => od 0 → 0.5
+                id(reg_soc_value) = 0.5f * ((soc - low) / (keep - low));
+              } else {
+                // v [keep .. keep+spread] => od 0.5 → 1
+                id(reg_soc_value) = 0.5f + 0.5f * ((soc - keep) / (high - keep));
+              }
+            }
+          }
+          // Po výpočtu reg_soc_value sloučíme s pid_output_temp a publikujeme total_power
+          float combined = std::max(id(pid_output_temp_value), id(reg_soc_value));
+          id(total_power).publish_state(combined);
+
+switch:
+  # 1) Switch "Regulace podle teploty" – ovládá PID teploty
+  - platform: template
+    name: "Regulace podle teploty"
+    id: pid_temp_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - logger.log: "Regulace podle teploty (PID teplota) zapnuta"
+      - climate.control:
+          id: water_heater_pid
+          mode: HEAT
+    turn_off_action:
+      - logger.log: "Regulace podle teploty (PID teplota) vypnuta"
+      - climate.control:
+          id: water_heater_pid
+          mode: "OFF"
+
+  # 2) Switch "Regulace podle SOC" – zapíná/vypíná lineární SOC regulaci
+  - platform: template
+    name: "Regulace podle SOC"
+    id: reg_soc_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - logger.log: "Regulace podle SOC zapnuta"
+    turn_off_action:
+      - logger.log: "Regulace podle SOC vypnuta"
+
+  # 3) Switch "SOC 100% FLAG" – ruční/automatické nastavení, že baterie je 100 %
+  - platform: template
+    name: "SOC 100% FLAG"
+    id: soc_flag
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - globals.set:
+          id: full_soc_reached
+          value: 'true'
+    turn_off_action:
+      - globals.set:
+          id: full_soc_reached
+          value: 'false'
+
+  # 4) Stykač 1 Status (jen zobrazení = internal)
+  - platform: template
+    name: "Stykač 1 Status"
+    id: stykac1_status
+    optimistic: true
+    lambda: |-
+      return id(stykac1).state;
+    icon: "mdi:power-plug"
+  - platform: gpio
+    pin: GPIO13
+    name: "Stykač 1 (L2)"
+    id: stykac1
+    internal: true
+
+  # 5) Stykač 2 Status (jen zobrazení = internal)
+  - platform: template
+    name: "Stykač 2 Status"
+    id: stykac2_status
+    optimistic: true
+    lambda: |-
+      return id(stykac2).state;
+    icon: "mdi:power-plug"
+  - platform: gpio
+    pin: GPIO14
+    name: "Stykač 2 (L3)"
+    id: stykac2
+    internal: true
+
+climate:
+  # Termostat – PID regulace teploty (řídí pid_output_temp)
+  - platform: pid
+    name: "Termostat"
+    id: water_heater_pid
+    sensor: temp
+    default_target_temperature: 55.0
+    heat_output: pid_output_temp
+    visual:
+      min_temperature: 20
+      max_temperature: 95
+    control_parameters:
+      kp: 0.33035
+      ki: 0.00038
+      kd: 71.20722
+      min_integral: -1.0
+      max_integral: 1.0
+      output_averaging_samples: 3
+      derivative_averaging_samples: 3
