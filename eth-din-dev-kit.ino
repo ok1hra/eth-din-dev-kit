@@ -38,7 +38,6 @@ TODO
 - gpio to mqtt report
 - mqtt to gpio control
 - ds18b20 resolution to setup
-- change prn() to debug.. if usb connected
 - temperature Farnhait switch
 
 Changelog:
@@ -47,8 +46,10 @@ Changelog:
 - Analog read Gpi39 voltage to mqtt
 - detect USB-C plug and publish to MQTT with topic /USBdetect
 - received RS485 data forward to MQTT with topic /RS485_RX
-- Extension web setup support
-- Extension 02 - capacity measure
+- Configuration web setup support
+- Configuration 02 - capacity measure
+- prn() use only if usb connected
+- watchog reset test mqtt temp delivery
 
 IDE 1.8.19
 Using library OneWire at version 2.3.8 in folder: /home/dan/Arduino/libraries/OneWire 
@@ -68,7 +69,7 @@ Using library PubSubClient at version 2.8 in folder: /home/dan/Arduino/libraries
 Using library Wire at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Wire 
 */
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20250519";
+const char* REV = "20250711";
 
 // USED
 const int HWidPin          = 34;  // analog
@@ -93,9 +94,9 @@ const int Gpio0Pin         =  0;  // in/out (RTS)
 /*
         +3V3
           |
-         R_1M
+         R_10M
           |
-  C?------------R_10k------->Gpi39Pin
+  C?------------R_1k------->Gpi39Pin
           |
           |
           \
@@ -105,19 +106,19 @@ const int Gpio0Pin         =  0;  // in/out (RTS)
         GND
 */
 
-#include "driver/adc.h"
-#include "driver/i2s.h"
+// #include "driver/adc.h"
+// #include "driver/i2s.h"
 
-#define I2S_NUM           I2S_NUM_0
-#define SAMPLE_RATE       200000         // 200 ksps – max pro I2S built-in ADC continuous mode
-#define BUF_SAMPLES       1024
-#define BUF_COUNT         2
+// #define I2S_NUM           I2S_NUM_0
+// #define SAMPLE_RATE       200000         // 200 ksps – max pro I2S built-in ADC continuous mode
+// #define BUF_SAMPLES       1024
+// #define BUF_COUNT         2
 
 const int Gpi39Pin = 39;        // GPIO ADC1_CHANNEL_3
 const int Gpio2Pin =  2;        // discharge
 const unsigned long measureInterval = 5000;      // interval spouštění v ms
 const int ignoreThreshold = 100;                 // práh pro ignorování startu
-const int measureThreshold = 4000;               // práh nabití kondenzátoru
+const int measureThreshold = 3000;               // (max 4095) práh nabití kondenzátoru | max presnost pri 63%=2580
 const unsigned long measureTimeoutUs = 1000000;  // timeout měření v µs (1 s)
 
 // Variables
@@ -134,8 +135,8 @@ float VoltagePOE      = 0.0;
 float VoltageGpi39      = 0.0;
 long WdtTimer=0;
 int BaudRate = 115200; // serial debug baudrate
-int Extension = 0; // select extension type
-const int Extension1pins[] = {13, 14, 12, 4, 2, 0};
+int Configuration = 0; // select Configuration type
+const int Configuration1pins[] = {13, 14, 12, 4, 2, 0};
 int EnableSerialDebug     = 0;
 #define HTTP_SERVER_PORT  80     // Web server port
 unsigned int OutputWatchdog;
@@ -201,7 +202,7 @@ static bool eth_connected = false;
   226-227 BaudRate
   236-245 - MQTT_USER
   246-265 - MQTT_PASS
-  266 - Extension
+  266 - Configuration
 
   !! Increment EEPROM_SIZE #define !! */
 
@@ -225,6 +226,8 @@ static bool eth_connected = false;
 #include <WebServer.h>
 WebServer ajaxserver(HTTP_SERVER_PORT+8);
 WiFiServer server(HTTP_SERVER_PORT);
+volatile bool shouldRestart = false;
+unsigned long restartTime = 0;
 #include <ETH.h>
 #if defined(OTAWEB)
   #include <AsyncTCP.h>
@@ -251,18 +254,27 @@ void setup() {
   }
   Serial.println("ETH DIN rail development kit");
   Serial.println("----------------------------");
+  Serial.println("REV  "+String(REV));
   pinMode(HWidPin, INPUT);
     HWidValue = readADC_Cal(analogRead(HWidPin));
-    if(HWidValue<=375){
-      HardwareRev=0;  // 162
-    }else if(HWidValue>375 && HWidValue<=800){
-      HardwareRev=1;  // 588
+    if(Configuration==3){
+      if(HWidValue<=375){
+        HardwareRev=0;  // 142
+      }else if(HWidValue>375 && HWidValue<=800){
+        HardwareRev=1;  // ???
+      }
+    }else{
+      if(HWidValue<=375){
+        HardwareRev=0;  // 162
+      }else if(HWidValue>375 && HWidValue<=800){
+        HardwareRev=1;  // 588
+      }
     }
   Serial.println("HW   "+String(HardwareRev));
   Serial.println("FW   "+String(REV));
   
   pinMode(VoltagePoePin, INPUT);
-  pinMode(Gpi39Pin, INPUT);
+  // pinMode(Gpi39Pin, INPUT);
   pinMode(USBdetectPin, INPUT);
   pinMode(RS485ReDePin, OUTPUT);
 
@@ -277,26 +289,36 @@ void setup() {
 
   // Capacity measurement
   pinMode(Gpio2Pin, OUTPUT);
+  pinMode(Gpi39Pin, INPUT);
 
-  // konfigurace I2S pro ADC1 DMA continuous mode
-  i2s_config_t i2s_config = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
-    .sample_rate = SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
-    .communication_format = I2S_COMM_FORMAT_I2S_MSB,
-    .intr_alloc_flags = 0,
-    .dma_buf_count = BUF_COUNT,
-    .dma_buf_len = BUF_SAMPLES,
-    .use_apll = false,
-    .tx_desc_auto_clear = false,
-    .fixed_mclk = 0
-  };
-  i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+  // // konfigurace I2S pro ADC1 DMA continuous mode
+  // i2s_config_t i2s_config = {
+  //   .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
+  //   .sample_rate = SAMPLE_RATE,
+  //   .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+  //   .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+  //   .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+  //   .intr_alloc_flags = 0,
+  //   .dma_buf_count = BUF_COUNT,
+  //   .dma_buf_len = BUF_SAMPLES,
+  //   .use_apll = false,
+  //   .tx_desc_auto_clear = false,
+  //   .fixed_mclk = 0
+  // };
+  // esp_err_t err;
+  // err = i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+  // Serial.printf("i2s_driver_install: %d\n", err);
+  // err = i2s_set_adc_mode(ADC_UNIT_1, ADC1_CHANNEL_3);
+  // Serial.printf("i2s_set_adc_mode: %d\n", err);
+  // err = i2s_adc_enable(I2S_NUM);
+  // Serial.printf("i2s_adc_enable: %d\n", err);
 
-  // ADC konfigurace pro GPIO39 (ADC1_CHANNEL_3)
-  adc1_config_width(ADC_WIDTH_BIT_12);
-  adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_11);
+  // i2s_zero_dma_buffer(I2S_NUM);
+  // i2s_start(I2S_NUM);
+
+  // // ADC konfigurace pro GPIO39 (ADC1_CHANNEL_3)
+  // adc1_config_width(ADC_WIDTH_BIT_12);
+  // adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_11);
 
 
   #if defined(DS18B20)
@@ -392,11 +414,11 @@ void setup() {
     }
   }
 
-  // 266 Extension
+  // 266 Configuration
     if(EEPROM.read(266)==0xff){
-      Extension=0;
+      Configuration=0;
     }else{
-      Extension=int(EEPROM.read(266));
+      Configuration=int(EEPROM.read(266));
     }
 
 
@@ -504,8 +526,6 @@ void loop() {
 
   // SPACE FOR YOUR CODE...
 
-
-
   
 }
 
@@ -534,16 +554,36 @@ uint32_t readADC_Cal(int ADC_Raw)
 }
 //-------------------------------------------------------------------------------------------------------
 void Watchdog(){
+
+  // restart from another point of code
+  if (shouldRestart && millis() > restartTime) {
+    ESP.restart();
+  }
+
   // Capacity measurement
-  if(Extension==2){
+  if(Configuration==2){
     static unsigned long lastMeasure = 0;
     unsigned long now = millis();
+    static float timeBuffer = 0;
+
     if (now - lastMeasure >= measureInterval) {
       lastMeasure = now;
-      uint32_t duration = measureChargeTime(ignoreThreshold, measureThreshold);
+      uint32_t duration = 0; // measureChargeTime(ignoreThreshold, measureThreshold);
+      for (int i=0; i<100; i++){
+        timeBuffer = timeBuffer + measureChargeTime(ignoreThreshold, measureThreshold);
+      }
+      duration = timeBuffer/100;
+      timeBuffer = 0;
       if (duration > 0) {
-        Serial.printf("Čas do dosažení prahu %d: %u µs\n", measureThreshold, duration);
+        // Serial.printf("Čas do dosažení prahu %d: %u µs\n", measureThreshold, duration);
+        Serial.printf("Čas do dosažení prahu %d: %u µs | ", measureThreshold, duration);
         MqttPubString("C-measure-µs", String(duration), false);
+        // Příklad: duration µs, referenční čas 94 000 µs pro 100%, odpor 10MΩ, práh ADC 3000 z 4095
+        float procenta = casNaKapacituProcentaExpon(duration, 94000, 1e7, 3000, 4095);
+        Serial.print("Kapacita: ");
+        Serial.print(procenta);
+        Serial.println(" %");
+        MqttPubString("C-measure-%", String(int(procenta)), false);
       } else {
         // Serial.println("."); // Měření neproběhlo nebo timeout
         MqttPubString("C-measure-µs", "failed or timeout", false);
@@ -559,8 +599,13 @@ void Watchdog(){
   static long OneWireTimer = 0;
   static long RS485beaconTimer = 0;
   if(millis()-ADCTimer > 5){
+    if(Configuration==3){
+    // R divider | 11,22/1,22=9.19672131
+      VoltageBuffer = VoltageBuffer + (readADC_Cal(analogRead(VoltagePoePin))/1000.0*9.1967)+0.3;
+    }else{
     // R divider | 12,95/2,95=4,38983050847458
-    VoltageBuffer = VoltageBuffer + readADC_Cal(analogRead(VoltagePoePin))/1000.0*4.39;
+      VoltageBuffer = VoltageBuffer + (readADC_Cal(analogRead(VoltagePoePin))/1000.0*4.39)+0.3;
+    }
     VoltageBufferGpi39 = VoltageBufferGpi39 + readADC_Cal(analogRead(Gpi39Pin))/1000.0; //*4.39;
     ADCCounter ++;
     if(ADCCounter > 34){
@@ -594,7 +639,7 @@ void Watchdog(){
 
 
   // GPIO snake
-  if(Extension==1){
+  if(Configuration==1){
     const int pins[] = {13, 14, 12, 4, 2, 0};  // pole výstupních pinů
     const int numPins = sizeof(pins) / sizeof(pins[0]);
     static int currentIndex = 0;                        // aktuální pozice v poli
@@ -608,6 +653,17 @@ void Watchdog(){
       // digitalWrite(Gpio2Pin, OutPut);
       // digitalWrite(Gpio0Pin, OutPut);
       
+      int prevIndex = (currentIndex + numPins - 1) % numPins;
+      digitalWrite(pins[prevIndex], LOW);
+      digitalWrite(pins[currentIndex], HIGH);
+      currentIndex = (currentIndex + 1) % numPins;  RS485beaconTimer=millis();
+    }
+  }
+  if(Configuration==3){
+    const int pins[] = {13, 14, 12};  // pole výstupních pinů
+    const int numPins = sizeof(pins) / sizeof(pins[0]);
+    static int currentIndex = 0;                        // aktuální pozice v poli
+    if(millis() - RS485beaconTimer > 1000){
       int prevIndex = (currentIndex + numPins - 1) % numPins;
       digitalWrite(pins[prevIndex], LOW);
       digitalWrite(pins[currentIndex], HIGH);
@@ -628,14 +684,18 @@ void Watchdog(){
   static float VoltagePOETimer = 0;
   // info if change POE voltage
   if(abs(VoltagePOETmp-VoltagePOE)>0.5 || millis() - VoltagePOETimer > 20000){
-    MqttPubString("VoltagePOE", String(VoltagePOE), false);
+    if(Configuration==3){
+      MqttPubString("InputVoltage", String(VoltagePOE), false);
+    }else{
+      MqttPubString("VoltagePOE", String(VoltagePOE), false);
+    }
     VoltagePOETmp=VoltagePOE;
     VoltagePOETimer=millis();
   }
 
   static float VoltageGpi39Tmp = 0;
   static float VoltageGpi39Timer = 0;
-  if(Extension<=2){
+  if(Configuration<=2){
     // info if change GPII39 voltage
     if(abs(VoltageGpi39Tmp-VoltageGpi39)>0.5 || millis() - VoltageGpi39Timer > 20000){
       MqttPubString("VoltageGpi39", String(VoltageGpi39), false);
@@ -662,12 +722,20 @@ void Watchdog(){
   
     T1Celsius = sensors1.getTempC(T1);
     if(T1Celsius != -127){
-      MqttPubString("T1-Celsius", String(T1Celsius), false);
+      MqttPubString("celsius/T1", String(T1Celsius), false);
+      shouldRestart = true;
+      restartTime = millis() + 5000;
     }
   
     T2Celsius = sensors2.getTempC(T2);
     if(T2Celsius != -127){
-      MqttPubString("T2-Celsius", String(T2Celsius), false);
+      if(Configuration==3){
+        MqttPubString("celsius", String(T2Celsius), false);
+      }else{
+        MqttPubString("celsius/T2", String(T2Celsius), false);
+        shouldRestart = true;
+        restartTime = millis() + 5000;
+      }
     }
   }
   #endif
@@ -687,6 +755,12 @@ void CLI2(){
   if(incomingByte==63 || incomingByte==72 || incomingByte==104){
     Prn(1, "http://"+String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
 
+  // @
+  }else if(incomingByte==64){
+      Prn(1,"** DIN module will be restarted **");
+      delay(1000);
+      ESP.restart();
+
   // CR/LF
   }else if(incomingByte==13||incomingByte==10){
     // Prn(1,"");
@@ -702,9 +776,11 @@ void CLI2(){
 
 //-------------------------------------------------------------------------------------------------------
 void Prn(int LN, String STR){
-  Serial.print(STR);
-  if(LN==1){
-    Serial.println();
+  if(USBdetect == true){
+    Serial.print(STR);
+    if(LN==1){
+      Serial.println();
+    }
   }
 }
 
@@ -1047,9 +1123,7 @@ void Mqtt(){
       long now = millis();
       if (now - lastMqttReconnectAttempt > 5000) {
         lastMqttReconnectAttempt = now;
-        if(EnableSerialDebug>0){
-          Prn(1, "Attempt to MQTT reconnect | "+String(millis()/1000) );
-        }
+        Prn(1, "MQTT attempt to reconnect | "+String(millis()/1000) );
         if (mqttReconnect()) {
           lastMqttReconnectAttempt = 0;
         }
@@ -1072,16 +1146,12 @@ bool mqttReconnect() {
   // charbuf[6] = 0;
   if(MQTT_LOGIN == true){
     if (mqttClient.connect(MACchar,MQTT_USER.c_str(),MQTT_PASS.c_str())){
-      if(EnableSerialDebug>0){
-        Prn(0, "mqttReconnect-connected");
-      }
+      Prn(1, "MQTT Reconnect-connected");
       reSubscribe();
     }
   }else{
     if (mqttClient.connect(MACchar)) {
-      if(EnableSerialDebug>0){
-        Prn(0, "mqttReconnect-connected");
-      }
+      Prn(1, "MQTT Reconnect-connected");
       // IPAddress IPlocalAddr = ETH.localIP();                           // get
       // String IPlocalAddrString = String(IPlocalAddr[0]) + "." + String(IPlocalAddr[1]) + "." + String(IPlocalAddr[2]) + "." + String(IPlocalAddr[3]);   // to string
       // MqttPubStringQC(1, "IP", IPlocalAddrString, true);
@@ -1093,33 +1163,10 @@ bool mqttReconnect() {
 
 //------------------------------------------------------------------------------------
 void reSubscribe(){
-    String topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/Target";
+    String topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/celsius/+";
     const char *cstr = topic.c_str();
     if(mqttClient.subscribe(cstr)==true){
-      if(EnableSerialDebug>0){
-        Prn(1, " > subscribe "+String(cstr));
-      }
-    }
-    topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/get";
-    const char *cstr1 = topic.c_str();
-    if(mqttClient.subscribe(cstr1)==true){
-      if(EnableSerialDebug>0){
-        Prn(1, " > subscribe "+String(cstr1));
-      }
-    }
-    topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/stop";
-    const char *cstr2 = topic.c_str();
-    if(mqttClient.subscribe(cstr2)==true){
-      if(EnableSerialDebug>0){
-        Prn(1, " > subscribe "+String(cstr2));
-      }
-    }
-    topic = String(YOUR_CALL) + "/" + String(NET_ID) + "/RxAzimuth";
-    const char *cstr3 = topic.c_str();
-    if(mqttClient.subscribe(cstr3)==true){
-      if(EnableSerialDebug>0){
-        Prn(1, " > subscribe "+String(cstr3));
-      }
+      Prn(1, "MQTT subscribe "+String(cstr));
     }
 }
 
@@ -1130,27 +1177,24 @@ void MqttRx(char *topic, byte *payload, unsigned int length) {
   byte* p = (byte*)malloc(length);
   memcpy(p,payload,length);
   // static bool HeardBeatStatus;
-  if(EnableSerialDebug>0){
-    Prn(0, "RX MQTT ");
-  }
+  // Prn(1, "MQTT rx");
 
-    // // RxAzimuth
-    // CheckTopicBase = String(YOUR_CALL) + "/" + String(NET_ID) + "/RxAzimuth";
+    // Rx send celsius for confirm
+    CheckTopicBase = String(YOUR_CALL) + "/" + String(NET_ID) + "/celsius/";
     // if ( CheckTopicBase.equals( String(topic) ) ){
-    //   RxAzimuth = 0;
-    //   unsigned long exp = 1;
-    //   for (int i = length-1; i >=0 ; i--) {
-    //     // Numbers only
-    //     if(p[i]>=48 && p[i]<=58){
-    //       RxAzimuth = RxAzimuth + (p[i]-48)*exp;
-    //       exp = exp*10;
-    //     }
-    //   }
-    //   if(AZsource == 2){ //MQTT
-    //     Azimuth=RxAzimuth;
-    //   }
-    //     Prn(1, "/RxAzimuth " + String(RxAzimuth));
-    // }
+    if (String(topic).startsWith(CheckTopicBase)) {
+      int RxCelsius = 0;
+      unsigned long exp = 1;
+      for (int i = length-1; i >=0 ; i--) {
+        // Numbers only
+        if(p[i]>=48 && p[i]<=57){
+          RxCelsius = RxCelsius + (p[i]-48)*exp;
+          exp = exp*10;
+        }
+      }
+      // Prn(1, "MQTT /celsius/+ " + String(RxCelsius));
+      shouldRestart = false;
+    }
 
 } // MqttRx END
 
@@ -1263,9 +1307,10 @@ void handleSet() {
   String mqtt_passSTYLE= "";
   String mqtt_passERR= "";
   String mqtt_loginDisable= "";
-  String extSELECT0= "";
-  String extSELECT1= "";
-  String extSELECT2= "";
+  String confSELECT0= "";
+  String confSELECT1= "";
+  String confSELECT2= "";
+  String confSELECT3= "";
 
   if ( ajaxserver.hasArg("yourcall") == false \
     && ajaxserver.hasArg("rotid") == false \
@@ -1405,16 +1450,17 @@ void handleSet() {
       Serial.println("New Baudrate "+String(BaudRate));
     }
 
-    // 266 Extension
-    if(ajaxserver.arg("ext").toInt() != Extension){
+    // 266 Configuration
+    if(ajaxserver.arg("ext").toInt() != Configuration){
       switch (ajaxserver.arg("ext").toInt()) {
-        case 0: {Extension= 0; break; }
-        case 1: {Extension= 1; break; }
-        case 2: {Extension= 2; break; }
+        case 0: {Configuration= 0; break; }
+        case 1: {Configuration= 1; break; }
+        case 2: {Configuration= 2; break; }
+        case 3: {Configuration= 3; break; }
       }
-      EEPROM.write(266, Extension);
-      MqttPubString("Extension", String(Extension), true);
-      Serial.println("Extension change to "+String(Extension)+"...");
+      EEPROM.write(266, Configuration);
+      MqttPubString("Configuration", String(Configuration), true);
+      Serial.println("Configuration change to "+String(Configuration)+"...");
     }
 
     // 161-164 - MQTT broker IP
@@ -1503,9 +1549,9 @@ void handleSet() {
       MqttPubString("MQTToginEnable", String(MQTT_LOGIN), true);
     }
     EEPROM.commit();
-    Serial.println("Interface will be restarted...");
-    delay(3000);
-    ESP.restart();
+    // Serial.println("Interface will be restarted...");
+    // delay(3000);
+    // ESP.restart();
   } // else form valid
 
 if(MQTT_LOGIN==true){
@@ -1541,13 +1587,14 @@ switch (BaudRate) {
   case 115200: {baudSELECT4= " selected"; break; }
 }
 
-extSELECT0= "";
-extSELECT1= "";
-extSELECT2= "";
-switch (Extension) {
-  case 0: {extSELECT0= " selected"; break; }
-  case 1: {extSELECT1= " selected"; break; }
-  case 2: {extSELECT2= " selected"; break; }
+confSELECT0= "";
+confSELECT1= "";
+confSELECT2= "";
+switch (Configuration) {
+  case 0: {confSELECT0= " selected"; break; }
+  case 1: {confSELECT1= " selected"; break; }
+  case 2: {confSELECT2= " selected"; break; }
+  case 3: {confSELECT3= " selected"; break; }
 }
 
   String HtmlSrc = "<!DOCTYPE html><html><head><title>SETUP</title>\n";
@@ -1629,21 +1676,23 @@ switch (Extension) {
   HtmlSrc += wsmqttportERR;
   HtmlSrc +="</span><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>websocket MQTT broker PORT - only for connection mqtt-wall web client. Default 1884</span></span></td></tr>\n";
 
-  HtmlSrc +="<tr class='b'><td class='tdr'><label for='ext'>Extension module:</label></td><td><select name='ext' id='ext'><option value='0'";
-  HtmlSrc += extSELECT0;
-  HtmlSrc +=">OFF</option><option value='1'";
-  HtmlSrc += extSELECT1;
-  HtmlSrc +=">01-Gpio</option><option value='2'";
-  HtmlSrc += extSELECT2;
-  HtmlSrc +=">02-C_measure</option></select><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Version external module<br>Must restart after change</span></span></td></tr>\n";
+  HtmlSrc +="<tr class='b'><td class='tdr'><label for='ext'>Configuration:</label></td><td><select name='ext' id='ext'><option value='0'";
+  HtmlSrc += confSELECT0;
+  HtmlSrc +=">DEFAULT</option><option value='1'";
+  HtmlSrc += confSELECT1;
+  HtmlSrc +=">01-GpioExtension</option><option value='2'";
+  HtmlSrc += confSELECT2;
+  HtmlSrc +=">02-C_measure</option><option value='3'";
+  HtmlSrc += confSELECT3;
+  HtmlSrc +=">03-SB_version</option></select><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Version external module<br>Must restart after change</span></span></td></tr>\n";
 
-  if(Extension==1){
+  if(Configuration==1){
     for (int i=0; i<6; i++){
       HtmlSrc +="<tr><td class='tdr'><label for='mqtt_login'>Gpio-";
-      HtmlSrc += Extension1pins[i];
+      HtmlSrc += Configuration1pins[i];
       HtmlSrc +=" set as OUTPUT</label></td><td><input type='checkbox' id='mqtt_login' name='mqtt_login' value='1' ${postData.mqtt_login?'checked':''} ";
       HtmlSrc += mqtt_loginCHECKED;
-      HtmlSrc +="><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Othervise set as INPUT</span></span></td></tr>\n";
+      HtmlSrc +="><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Othervise set as INPUT<br>You MUST also switch the hardware jumper on the PCB!</span></span></td></tr>\n";
     }
   }
 
@@ -1657,26 +1706,25 @@ switch (Extension) {
   HtmlSrc +="</body></html>\n";
 
   ajaxserver.send(200, "text/html", HtmlSrc); //Send web page
+  // set restart after 3 second
+  shouldRestart = true;
+  restartTime = millis() + 3000;
+  Serial.println("Interface will be restarted...");
 }
 
 // Capacity measurement
 uint32_t measureChargeTime(int ignoreThreshold, int threshold) {
-  static int16_t buffer[BUF_SAMPLES];
+  // static int16_t buffer[BUF_SAMPLES];
   size_t bytes_read;
 
   // zkontrolujeme, zda vstupní napětí nepřesahuje ignoreThreshold
   int initial = analogRead(Gpi39Pin);
   if (initial > ignoreThreshold) {
+    Serial.println("C-meause skip (raw input="+String(initial)+")");
+    digitalWrite(Gpio2Pin, HIGH);
     return 0; // přeskočit měření
   }
 
-  // nakonfigurujeme ADC kanál
-  i2s_set_adc_mode(ADC_UNIT_1, ADC1_CHANNEL_3);
-
-  // povolíme a spustíme ADC-DMA
-  i2s_adc_enable(I2S_NUM);
-  i2s_zero_dma_buffer(I2S_NUM);
-  i2s_start(I2S_NUM);
 
   // Před měřením spustíme výstup LOW
   digitalWrite(Gpio2Pin, LOW);
@@ -1684,28 +1732,74 @@ uint32_t measureChargeTime(int ignoreThreshold, int threshold) {
 
   // Čteme DMA bloky dokud nenajdeme vzorek >= threshold nebo timeout
   while ((micros() - start) < measureTimeoutUs) {
-    esp_err_t res = i2s_read(I2S_NUM, buffer, BUF_SAMPLES * sizeof(int16_t), &bytes_read, portMAX_DELAY);
-    if (res != ESP_OK) {
-      Serial.printf("Chyba čtení DMA: %d\n", res);
-      MqttPubString("C-measure-µs", "DMA read error: "+String(res), false);
-      break;
-    }
-    int count = bytes_read / sizeof(int16_t);
-    for (int i = 0; i < count; ++i) {
-      int raw = buffer[i] & 0x0FFF;
-      if (raw >= threshold) {
-        uint32_t end = micros();
-        digitalWrite(Gpio2Pin, HIGH);
-        i2s_stop(I2S_NUM);
-        i2s_adc_disable(I2S_NUM);
-        return end - start;
-      }
+    if (analogRead(Gpi39Pin) >= threshold) {
+      uint32_t end = micros();
+      digitalWrite(Gpio2Pin, HIGH);
+      return end - start;
     }
   }
 
+  // // Čteme DMA bloky dokud nenajdeme vzorek >= threshold nebo timeout
+  // while ((micros() - start) < measureTimeoutUs) {
+  //   esp_err_t res = i2s_read(I2S_NUM, buffer, BUF_SAMPLES * sizeof(int16_t), &bytes_read, portMAX_DELAY);
+  //   if (res != ESP_OK) {
+  //     Serial.printf("Chyba čtení DMA: %d\n", res);
+  //     MqttPubString("C-measure-µs", "DMA read error: "+String(res), false);
+  //     break;
+  //   }
+  //   int count = bytes_read / sizeof(int16_t);
+  //   for (int i = 0; i < count; ++i) {
+  //     int raw = buffer[i] & 0x0FFF;
+  //     // if (i % 100 == 0) { // vypiš každý stý vzorek
+  //     //   Serial.print("vzorek[");
+  //     //   Serial.print(i);
+  //     //   Serial.print("] = ");
+  //     //   Serial.println(raw);
+  //     // }
+  //     if (raw >= threshold) {
+  //       uint32_t end = micros();
+  //       digitalWrite(Gpio2Pin, HIGH);
+  //       i2s_stop(I2S_NUM);
+  //       i2s_adc_disable(I2S_NUM);
+  //       return end - start;
+  //     }
+  //   }
+  // }
+
   // Timeout nebo chyba - zastavíme ADC-DMA a přepneme výstup HIGH
-  i2s_stop(I2S_NUM);
-  i2s_adc_disable(I2S_NUM);
+  // i2s_stop(I2S_NUM);
+  // i2s_adc_disable(I2S_NUM);
   digitalWrite(Gpio2Pin, HIGH);
   return 0;
+}
+
+
+float casNaKapacituProcentaExpon(
+  unsigned long namerenyCas,          // změřený čas v mikrosekundách
+  unsigned long casProStoProcent,     // referenční čas v mikrosekundách (100 %)
+  float odporOhm,                     // odpor v ohmech
+  int urovenPrahu,                    // práh ADC (např. 3000)
+  int rozsahADC                       // maximum ADC (např. 4095)
+) {
+  // Převod času na sekundy
+  float t = namerenyCas / 1e6;
+  float tref = casProStoProcent / 1e6;
+  
+  // Poměr prahu k plnému rozsahu (např. 3000/4095)
+  float x = (float)urovenPrahu / (float)rozsahADC;
+  if (x <= 0.0 || x >= 1.0) return 0.0; // ochrana před log(0) nebo log(záporného čísla)
+
+  float lnOneMinusX = log(1.0 - x);
+
+  // Výpočet kapacity podle exponenciály
+  float C = -t / (odporOhm * lnOneMinusX);
+  float Cref = -tref / (odporOhm * lnOneMinusX);
+
+  if (Cref <= 0.0) return 0.0; // ochrana před dělením nulou
+
+  float procento = (C / Cref) * 100.0;
+  // Omez na rozumné hodnoty
+  if (procento > 100.0) procento = 100.0;
+  if (procento < 0.0) procento = 0.0;
+  return procento;
 }
