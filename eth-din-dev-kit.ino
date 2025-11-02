@@ -69,7 +69,7 @@ Using library PubSubClient at version 2.8 in folder: /home/dan/Arduino/libraries
 Using library Wire at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Wire 
 */
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20250711";
+const char* REV = "20251102";
 
 // USED
 const int HWidPin          = 34;  // analog
@@ -265,9 +265,11 @@ void setup() {
       }
     }else{
       if(HWidValue<=375){
-        HardwareRev=0;  // 162
-      }else if(HWidValue>375 && HWidValue<=800){
-        HardwareRev=1;  // 588
+        HardwareRev=1;  // 162
+      }else if(HWidValue>375 && HWidValue<=710){
+        HardwareRev=2;  // 588
+      }else if(HWidValue>710 && HWidValue<=1000){
+        HardwareRev=3;  // 860
       }
     }
   Serial.println("HW   "+String(HardwareRev));
