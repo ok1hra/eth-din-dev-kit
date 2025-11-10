@@ -42,11 +42,12 @@ web_server:
 #    subnet: 255.255.255.0
 
 wifi:
-  ssid: ""
-  password: ""
+#  ssid: ""
+#  password: ""
   ap:
     ssid: "EMS NG"
     password: "12345678"
+captive_portal:
 
 # ────────────── Globální proměnné ──────────────
 globals:
