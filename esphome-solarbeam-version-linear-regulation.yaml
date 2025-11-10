@@ -27,6 +27,20 @@ ota:
 web_server:
   port: 80
 
+## Muze byt aktivni POUZE ethernet, nebo WIFI rozhrani, NE OBOJI!
+
+#ethernet:
+#  type: LAN8720
+#  mdc_pin: GPIO23
+#  mdio_pin: GPIO18
+#  clk_mode: GPIO17_OUT
+#  phy_addr: 0
+## Optional ethernet static IP
+#  manual_ip:
+#    static_ip: 192.168.1.73
+#    gateway: 192.168.1.1
+#    subnet: 255.255.255.0
+
 wifi:
   ssid: ""
   password: ""
