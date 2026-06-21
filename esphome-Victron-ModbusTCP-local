@@ -1,0 +1,848 @@
+# SOLARBEAM EMS NG - verze 10
+# Změny: MQTT nahrazeno Modbus TCP (creepystefan/esphome_modbus_tcp)
+#        Grid data (L1/L2/L3) + SOC čteny přímo z Cerbo GX přes Modbus TCP
+#        Unit ID 100 = com.victronenergy.system (SOC, reg 843)
+#        Unit ID  31 = com.victronenergy.grid   (grid meter, reg 2600+)
+
+esphome:
+  name: esphome-web-ab7e4c
+  friendly_name: SOLARBEAM EMS NG - 1
+  min_version: 2025.5.0
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -10
+    then:
+      - output.turn_on: ssr
+      - output.set_level:
+          id: ssr
+          level: 0.0
+      - switch.turn_off: wattrouter_enable
+      - switch.turn_off: thermostat_enable
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+api:
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+  version: 3
+  sorting_groups:
+    - id: group_status
+      name: "📊 Status"
+      sorting_weight: 1
+    - id: group_wattrouter
+      name: "⚡ Wattrouter"
+      sorting_weight: 2
+    - id: group_thermostat
+      name: "🌡️ Termostat"
+      sorting_weight: 3
+    - id: group_window1
+      name: "🕐 Časové okno 1"
+      sorting_weight: 4
+    - id: group_window2
+      name: "🕑 Časové okno 2"
+      sorting_weight: 5
+    - id: group_window3
+      name: "🕒 Časové okno 3"
+      sorting_weight: 6
+
+wifi:
+  ssid: "Internet"
+  password: "lopata#*"
+  ap:
+    ssid: "EMS NG"
+    password: "12345678"
+
+# ─── Modbus TCP — external component ─────────────────────────────
+external_components:
+  - source: github://creepystefan/esphome_modbus_tcp
+    refresh: 0s
+
+modbustcp:
+  - id: cerbo_tcp
+    host: "192.168.27.37"
+    port: 502
+    send_wait_time: 250ms
+
+modbustcp_controller:
+  # System data (SOC atd.) — Unit ID 100
+  - id: cerbo_system
+    modbustcp_id: cerbo_tcp
+    address: 100
+    update_interval: 10s
+    on_online:
+      then:
+        - globals.set:
+            id: cerbo_online
+            value: 'true'
+        - logger.log: "Cerbo GX Modbus: online"
+    on_offline:
+      then:
+        - globals.set:
+            id: cerbo_online
+            value: 'false'
+        - logger.log: "Cerbo GX Modbus: offline"
+
+  # Grid Smart Meter — Unit ID 31 (com.victronenergy.grid /0)
+  - id: cerbo_grid
+    modbustcp_id: cerbo_tcp
+    address: 31
+    update_interval: 2s
+
+# ────────────── Global variables ──────────────
+globals:
+  - id: cerbo_online
+    type: bool
+    initial_value: 'false'
+  - id: wattrouter_output
+    type: float
+    initial_value: '0.0'
+  - id: thermostat_output
+    type: float
+    initial_value: '0.0'
+  - id: pi_integral
+    type: float
+    initial_value: '0.0'
+
+one_wire:
+  - platform: gpio
+    pin: GPIO15
+
+# ────────────── NUMBER INPUTS ──────────────
+number:
+  # ── Wattrouter ──
+  - platform: template
+    name: "Cílový výkon sítě (W)"
+    id: wattrouter_target
+    min_value: -1000
+    max_value: 0
+    step: 50
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: -300
+    unit_of_measurement: "W"
+    icon: "mdi:transmission-tower-export"
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 1
+
+  - platform: template
+    name: "P zesílení (wattrouter)"
+    id: wattrouter_p_gain
+    min_value: 0.01
+    max_value: 1.0
+    step: 0.01
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0.20
+    icon: "mdi:tune"
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 2
+
+  - platform: template
+    name: "I složka ×10⁻⁶ (wattrouter)"
+    id: wattrouter_i_gain
+    min_value: 1
+    max_value: 100
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    icon: "mdi:chart-timeline-variant"
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 3
+
+  - platform: template
+    name: "Max. výkon bojleru (W)"
+    id: boiler_max_power
+    min_value: 1000
+    max_value: 20000
+    step: 500
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 6000
+    unit_of_measurement: "W"
+    icon: "mdi:water-boiler"
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 4
+
+  # ── Thermostat ──
+  - platform: template
+    name: "Pásmo regulace (°C)"
+    id: thermostat_band
+    min_value: 1.0
+    max_value: 20.0
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 8.0
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer-lines"
+    web_server:
+      sorting_group_id: group_thermostat
+      sorting_weight: 0
+
+  # ── Time window 1 ──
+  - platform: template
+    name: "Okno 1 - začátek (h)"
+    id: w1_start_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 2
+
+  - platform: template
+    name: "Okno 1 - začátek (min)"
+    id: w1_start_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 40
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 3
+
+  - platform: template
+    name: "Okno 1 - konec (h)"
+    id: w1_end_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 7
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 4
+
+  - platform: template
+    name: "Okno 1 - konec (min)"
+    id: w1_end_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 5
+
+  - platform: template
+    name: "Okno 1 - cílová teplota (°C)"
+    id: w1_temp
+    min_value: 20
+    max_value: 95
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 55.0
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 6
+
+  # ── Time window 2 ──
+  - platform: template
+    name: "Okno 2 - začátek (h)"
+    id: w2_start_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 11
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 2
+
+  - platform: template
+    name: "Okno 2 - začátek (min)"
+    id: w2_start_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 3
+
+  - platform: template
+    name: "Okno 2 - konec (h)"
+    id: w2_end_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 14
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 4
+
+  - platform: template
+    name: "Okno 2 - konec (min)"
+    id: w2_end_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 5
+
+  - platform: template
+    name: "Okno 2 - cílová teplota (°C)"
+    id: w2_temp
+    min_value: 20
+    max_value: 95
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 60.0
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 6
+
+  # ── Time window 3 ──
+  - platform: template
+    name: "Okno 3 - začátek (h)"
+    id: w3_start_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 20
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 2
+
+  - platform: template
+    name: "Okno 3 - začátek (min)"
+    id: w3_start_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 3
+
+  - platform: template
+    name: "Okno 3 - konec (h)"
+    id: w3_end_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 22
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 4
+
+  - platform: template
+    name: "Okno 3 - konec (min)"
+    id: w3_end_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 5
+
+  - platform: template
+    name: "Okno 3 - cílová teplota (°C)"
+    id: w3_temp
+    min_value: 20
+    max_value: 95
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 45.0
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 6
+
+  - platform: template
+    name: "Výkon (POWER OUT)"
+    id: total_power
+    min_value: 0.0
+    max_value: 1.0
+    step: 0.01
+    mode: slider
+    optimistic: true
+    initial_value: 0.0
+    icon: "mdi:lightning-bolt"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 4
+    on_value:
+      - lambda: |-
+          float per_phase = 1.0f / 3.0f;
+          float v = x;
+          float ssr_lvl = 0.0f;
+          if (v < per_phase) {
+            ssr_lvl = v / per_phase;
+            id(stykac1).turn_off();
+            id(stykac2).turn_off();
+          } else if (v < 2.0f * per_phase) {
+            ssr_lvl = (v - per_phase) / per_phase;
+            id(stykac1).turn_on();
+            id(stykac2).turn_off();
+          } else {
+            ssr_lvl = (v - 2.0f * per_phase) / per_phase;
+            id(stykac1).turn_on();
+            id(stykac2).turn_on();
+          }
+          id(ssr).set_level(ssr_lvl);
+
+# ────────────── SENSORS ──────────────
+sensor:
+  # ── Dallas teplota vody ──
+  - platform: dallas_temp
+    index: 0
+    name: "Teplota vody"   # první čidlo na one_wire sběrnici
+    id: temp
+    update_interval: 5s
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 1
+
+  # ── Modbus: System (Unit ID 100) ──
+  - platform: modbustcp_controller
+    modbustcp_controller_id: cerbo_system
+    name: "SOC baterie"
+    id: soc_sensor
+    register_type: holding
+    address: 843
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: battery
+    state_class: measurement
+    icon: "mdi:battery"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 3
+
+  # ── Modbus: Grid meter (Unit ID 31) ──
+  # Registry 2600-2602: výkony L1/L2/L3 (W), int16, scale 1:1
+  # Kladné = import ze sítě, záporné = export do sítě
+  - platform: modbustcp_controller
+    modbustcp_controller_id: cerbo_grid
+    name: "Grid výkon L1"
+    id: grid_l1_sensor
+    register_type: holding
+    address: 2600
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+    icon: "mdi:transmission-tower"
+
+  - platform: modbustcp_controller
+    modbustcp_controller_id: cerbo_grid
+    name: "Grid výkon L2"
+    id: grid_l2_sensor
+    register_type: holding
+    address: 2601
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+    icon: "mdi:transmission-tower"
+
+  - platform: modbustcp_controller
+    modbustcp_controller_id: cerbo_grid
+    name: "Grid výkon L3"
+    id: grid_l3_sensor
+    register_type: holding
+    address: 2602
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+    icon: "mdi:transmission-tower"
+
+  # Celkový výkon sítě = součet L1+L2+L3 (register 2603 nespolehlivý)
+  - platform: template
+    name: "Výkon sítě celkem (W)"
+    id: grid_power_sensor
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+    update_interval: 2s
+    lambda: |-
+      return id(grid_l1_sensor).state
+           + id(grid_l2_sensor).state
+           + id(grid_l3_sensor).state;
+    icon: "mdi:transmission-tower"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 2
+
+  # ── Template sensory ──
+  - platform: template
+    name: "PI integrál"
+    id: pi_integral_sensor
+    unit_of_measurement: ""
+    accuracy_decimals: 3
+    update_interval: 2s
+    lambda: |-
+      return id(pi_integral);
+    icon: "mdi:sigma"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 5
+
+  - platform: template
+    name: "Termostat výkon (%)"
+    id: thermostat_pct
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 2s
+    lambda: |-
+      return id(thermostat_output) * 100.0f;
+    icon: "mdi:thermometer-auto"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 6
+
+  - platform: template
+    name: "SSR úroveň"
+    unit_of_measurement: ""
+    update_interval: 1s
+    lambda: |-
+      return id(total_power).state;
+    icon: "mdi:sine-wave"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 7
+
+# ────────────── BINARY SENSORS ──────────────
+binary_sensor:
+  - platform: template
+    name: "Cerbo GX online"
+    id: cerbo_online_sensor
+    device_class: connectivity
+    lambda: |-
+      return id(cerbo_online);
+    icon: "mdi:lan-connect"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 8
+
+  - platform: template
+    name: "Termostat aktivní"
+    lambda: |-
+      return id(thermostat_output) > 0.01f;
+    icon: "mdi:clock-time-four"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 9
+
+  - platform: template
+    name: "Wattrouter aktivní"
+    lambda: |-
+      return id(wattrouter_output) > 0.01f;
+    icon: "mdi:solar-power"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 10
+
+# ────────────── SWITCHES ──────────────
+switch:
+  - platform: template
+    name: "Wattrouter zapnout"
+    id: wattrouter_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:solar-power"
+    turn_off_action:
+      - globals.set:
+          id: wattrouter_output
+          value: '0.0'
+      - globals.set:
+          id: pi_integral
+          value: '0.0'
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 0
+
+  - platform: template
+    name: "Termostat zapnout"
+    id: thermostat_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:thermometer-auto"
+    turn_off_action:
+      - globals.set:
+          id: thermostat_output
+          value: '0.0'
+    web_server:
+      sorting_group_id: group_thermostat
+      sorting_weight: 1
+
+  - platform: template
+    name: "Okno 1 - pracovní dny"
+    id: w1_workdays
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    icon: "mdi:briefcase"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 0
+
+  - platform: template
+    name: "Okno 1 - víkend"
+    id: w1_weekend
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:sofa"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 1
+
+  - platform: template
+    name: "Okno 2 - pracovní dny"
+    id: w2_workdays
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    icon: "mdi:briefcase"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 0
+
+  - platform: template
+    name: "Okno 2 - víkend"
+    id: w2_weekend
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:sofa"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 1
+
+  - platform: template
+    name: "Okno 3 - pracovní dny"
+    id: w3_workdays
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    icon: "mdi:briefcase"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 0
+
+  - platform: template
+    name: "Okno 3 - víkend"
+    id: w3_weekend
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:sofa"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 1
+
+  - platform: template
+    name: "Stykač L2"
+    optimistic: true
+    lambda: return id(stykac1).state;
+    icon: "mdi:power-plug"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 11
+
+  - platform: template
+    name: "Stykač L3"
+    optimistic: true
+    lambda: return id(stykac2).state;
+    icon: "mdi:power-plug"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 12
+
+  - platform: gpio
+    pin: GPIO13
+    name: "Contactor L2"
+    id: stykac1
+    internal: true
+
+  - platform: gpio
+    pin: GPIO14
+    name: "Contactor L3"
+    id: stykac2
+    internal: true
+
+# ────────────── TIME ──────────────
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "Europe/Prague"
+
+# ────────────── OUTPUT ──────────────
+output:
+  - platform: slow_pwm
+    pin: GPIO12
+    id: ssr
+    period: 100ms
+    zero_means_zero: true
+    inverted: false
+
+# ────────────── MAIN CONTROL LOOP ──────────────
+interval:
+  - interval: 2s
+    then:
+      - lambda: |-
+          const float dt = 2.0f;
+
+          // ── Thermostat: P-controller s pásmem regulace ────────────────
+          auto in_window = [](int h, int m, int sh, int sm, int eh, int em) -> bool {
+            int now_min   = h * 60 + m;
+            int start_min = sh * 60 + sm;
+            int end_min   = eh * 60 + em;
+            return (now_min >= start_min && now_min < end_min);
+          };
+
+          auto now = id(sntp_time).now();
+          float therm_out = 0.0f;
+
+          if (now.is_valid() && id(thermostat_enable).state) {
+            int cur_h  = now.hour;
+            int cur_m  = now.minute;
+            bool is_weekend = (now.day_of_week == 1 || now.day_of_week == 7);
+            bool is_workday = !is_weekend;
+            float water_temp = id(temp).state;
+            float band = id(thermostat_band).state;
+
+            float active_target = -1.0f;
+
+            bool w1_ok = (is_workday && id(w1_workdays).state)
+                      || (is_weekend && id(w1_weekend).state);
+            if (w1_ok && in_window(cur_h, cur_m,
+                   (int)id(w1_start_h).state, (int)id(w1_start_m).state,
+                   (int)id(w1_end_h).state,   (int)id(w1_end_m).state))
+              active_target = id(w1_temp).state;
+
+            bool w2_ok = (is_workday && id(w2_workdays).state)
+                      || (is_weekend && id(w2_weekend).state);
+            if (w2_ok && in_window(cur_h, cur_m,
+                   (int)id(w2_start_h).state, (int)id(w2_start_m).state,
+                   (int)id(w2_end_h).state,   (int)id(w2_end_m).state))
+              active_target = id(w2_temp).state;
+
+            bool w3_ok = (is_workday && id(w3_workdays).state)
+                      || (is_weekend && id(w3_weekend).state);
+            if (w3_ok && in_window(cur_h, cur_m,
+                   (int)id(w3_start_h).state, (int)id(w3_start_m).state,
+                   (int)id(w3_end_h).state,   (int)id(w3_end_m).state))
+              active_target = id(w3_temp).state;
+
+            if (active_target > 0.0f) {
+              float error = active_target - water_temp;
+              therm_out = std::max(0.0f, std::min(1.0f, error / band));
+            }
+          }
+          id(thermostat_output) = therm_out;
+
+          // ── Wattrouter: PI-controller s anti-windup ───────────────────
+          // grid_power_sensor.state: kladné = import, záporné = export
+          if (id(wattrouter_enable).state && id(cerbo_online)) {
+            float grid_w   = id(grid_power_sensor).state;
+            float target_w = id(wattrouter_target).state;
+            float kp       = id(wattrouter_p_gain).state;
+            float ki       = id(wattrouter_i_gain).state / 1000000.0f;
+            float max_w    = id(boiler_max_power).state;
+            float cur_out  = id(total_power).state;
+
+            float error_norm = (grid_w - target_w) / max_w;
+
+            id(pi_integral) += error_norm * dt;
+
+            float raw_out = cur_out + (-error_norm * kp) + (-id(pi_integral) * ki);
+            float new_out = std::max(0.0f, std::min(1.0f, raw_out));
+
+            if (new_out != raw_out) {
+              id(pi_integral) -= error_norm * dt;
+            }
+
+            id(wattrouter_output) = new_out;
+
+          } else {
+            id(wattrouter_output) = 0.0f;
+            id(pi_integral) = 0.0f;
+          }
+
+          // ── Kombinace: vyhrává vyšší z obou ──────────────────────────
+          float combined = std::max(id(wattrouter_output), id(thermostat_output));
+          id(total_power).publish_state(combined);
