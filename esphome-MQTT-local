@@ -1,0 +1,860 @@
+# SOLARBEAM EMS NG - verze 4
+# Změny: termostat přepracován z ON/OFF na P regulátor
+#        nové parametry: P gain termostatu, rozsah regulace (°C pod cílem = 100% výkon)
+
+esphome:
+  name: esphome-web-ab7e4c
+  friendly_name: SOLARBEAM EMS NG - 1
+  min_version: 2025.5.0
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -10
+    then:
+      - output.turn_on: ssr
+      - output.set_level:
+          id: ssr
+          level: 0.0
+      - switch.turn_off: wattrouter_enable
+      - switch.turn_off: thermostat_enable
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+api:
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+  version: 3
+  sorting_groups:
+    - id: group_status
+      name: "📊 Status"
+      sorting_weight: 1
+    - id: group_wattrouter
+      name: "⚡ Wattrouter"
+      sorting_weight: 2
+    - id: group_thermostat
+      name: "🌡️ Termostat"
+      sorting_weight: 3
+    - id: group_window1
+      name: "🕐 Časové okno 1"
+      sorting_weight: 4
+    - id: group_window2
+      name: "🕑 Časové okno 2"
+      sorting_weight: 5
+    - id: group_window3
+      name: "🕒 Časové okno 3"
+      sorting_weight: 6
+
+wifi:
+  ssid: "Internet"
+  password: "lopata#*"
+  ap:
+    ssid: "EMS NG"
+    password: "12345678"
+
+# ─── MQTT connection to Cerbo GX local broker ────────────────────
+mqtt:
+  broker: "192.168.27.37"
+  port: 1883
+  client_id: "solarbeam_ems"
+  keepalive: 60s
+  on_connect:
+    then:
+      - mqtt.publish:
+          topic: "R/c0619ab36c7e/keepalive"
+          payload: ""
+      - logger.log: "Cerbo GX MQTT: connected, keepalive sent"
+  on_disconnect:
+    then:
+      - logger.log: "Cerbo GX MQTT: disconnected"
+  on_message:
+    # Grid power L1 — negative = export to grid
+    - topic: "N/c0619ab36c7e/system/0/Ac/Grid/L1/Power"
+      then:
+        - lambda: |-
+            auto doc = json::parse_json(x);
+            if (doc["value"].is<float>())
+              id(grid_l1_power) = doc["value"].as<float>();
+            else if (doc["value"].is<int>())
+              id(grid_l1_power) = (float)doc["value"].as<int>();
+            id(grid_power_total) = id(grid_l1_power) + id(grid_l2_power) + id(grid_l3_power);
+            id(cerbo_online) = true;
+
+    # Grid power L2
+    - topic: "N/c0619ab36c7e/system/0/Ac/Grid/L2/Power"
+      then:
+        - lambda: |-
+            auto doc = json::parse_json(x);
+            if (doc["value"].is<float>())
+              id(grid_l2_power) = doc["value"].as<float>();
+            else if (doc["value"].is<int>())
+              id(grid_l2_power) = (float)doc["value"].as<int>();
+            id(grid_power_total) = id(grid_l1_power) + id(grid_l2_power) + id(grid_l3_power);
+
+    # Grid power L3
+    - topic: "N/c0619ab36c7e/system/0/Ac/Grid/L3/Power"
+      then:
+        - lambda: |-
+            auto doc = json::parse_json(x);
+            if (doc["value"].is<float>())
+              id(grid_l3_power) = doc["value"].as<float>();
+            else if (doc["value"].is<int>())
+              id(grid_l3_power) = (float)doc["value"].as<int>();
+            id(grid_power_total) = id(grid_l1_power) + id(grid_l2_power) + id(grid_l3_power);
+
+    # Battery SOC
+    - topic: "N/c0619ab36c7e/system/0/Dc/Battery/Soc"
+      then:
+        - lambda: |-
+            auto doc = json::parse_json(x);
+            if (doc["value"].is<float>())
+              id(soc_value_global) = doc["value"].as<float>();
+            else if (doc["value"].is<int>())
+              id(soc_value_global) = (float)doc["value"].as<int>();
+
+# ────────────── Global variables ──────────────
+globals:
+  - id: grid_l1_power
+    type: float
+    initial_value: '0.0'
+  - id: grid_l2_power
+    type: float
+    initial_value: '0.0'
+  - id: grid_l3_power
+    type: float
+    initial_value: '0.0'
+  - id: grid_power_total
+    type: float
+    initial_value: '0.0'
+  - id: soc_value_global
+    type: float
+    initial_value: '0.0'
+  - id: cerbo_online
+    type: bool
+    initial_value: 'false'
+  - id: wattrouter_output
+    type: float
+    initial_value: '0.0'
+  - id: thermostat_output
+    type: float
+    initial_value: '0.0'
+
+one_wire:
+  - platform: gpio
+    pin: GPIO15
+
+# ────────────── NUMBER INPUTS ──────────────
+number:
+  # ── Wattrouter ──
+
+  - platform: template
+    name: "Cílový výkon sítě (W)"
+    id: wattrouter_target
+    min_value: -10000
+    max_value: 0
+    step: 50
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: -300
+    unit_of_measurement: "W"
+    icon: "mdi:transmission-tower-export"
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 1
+
+  - platform: template
+    name: "P zesílení (wattrouter)"
+    id: wattrouter_p_gain
+    min_value: 0.1
+    max_value: 10.0
+    step: 0.1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 1.0
+    icon: "mdi:tune"
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 2
+
+  - platform: template
+    name: "Mrtvé pásmo (W)"
+    id: wattrouter_dead_band
+    min_value: 0
+    max_value: 500
+    step: 10
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 100
+    unit_of_measurement: "W"
+    icon: "mdi:arrow-collapse-horizontal"
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 3
+
+  - platform: template
+    name: "Max. výkon bojleru (W)"
+    id: boiler_max_power
+    min_value: 1000
+    max_value: 20000
+    step: 500
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 6000
+    unit_of_measurement: "W"
+    icon: "mdi:water-boiler"
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 4
+
+  # ── Thermostat P-controller ──
+
+  # P gain for thermostat — scales how aggressively output responds to temperature error
+  - platform: template
+    name: "P zesílení (termostat)"
+    id: thermostat_p_gain
+    min_value: 0.1
+    max_value: 5.0
+    step: 0.1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 1.5
+    icon: "mdi:tune-variant"
+    web_server:
+      sorting_group_id: group_thermostat
+      sorting_weight: 0
+
+  # Temperature range below target at which boiler runs at 100% power
+  # e.g. range=10, target=60 → at 50°C power=100%, at 55°C power=50%, at 59°C power=10%
+  - platform: template
+    name: "Rozsah regulace (°C)"
+    id: thermostat_p_range
+    min_value: 1.0
+    max_value: 30.0
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 10.0
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer-lines"
+    web_server:
+      sorting_group_id: group_thermostat
+      sorting_weight: 1
+
+  # ── Time window 1 ──
+  - platform: template
+    name: "Okno 1 - začátek (h)"
+    id: w1_start_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 2
+
+  - platform: template
+    name: "Okno 1 - začátek (min)"
+    id: w1_start_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 40
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 3
+
+  - platform: template
+    name: "Okno 1 - konec (h)"
+    id: w1_end_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 7
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 4
+
+  - platform: template
+    name: "Okno 1 - konec (min)"
+    id: w1_end_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 5
+
+  - platform: template
+    name: "Okno 1 - cílová teplota (°C)"
+    id: w1_temp
+    min_value: 20
+    max_value: 95
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 55.0
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 6
+
+  # ── Time window 2 ──
+  - platform: template
+    name: "Okno 2 - začátek (h)"
+    id: w2_start_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 11
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 2
+
+  - platform: template
+    name: "Okno 2 - začátek (min)"
+    id: w2_start_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 3
+
+  - platform: template
+    name: "Okno 2 - konec (h)"
+    id: w2_end_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 14
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 4
+
+  - platform: template
+    name: "Okno 2 - konec (min)"
+    id: w2_end_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 5
+
+  - platform: template
+    name: "Okno 2 - cílová teplota (°C)"
+    id: w2_temp
+    min_value: 20
+    max_value: 95
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 60.0
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 6
+
+  # ── Time window 3 ──
+  - platform: template
+    name: "Okno 3 - začátek (h)"
+    id: w3_start_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 20
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 2
+
+  - platform: template
+    name: "Okno 3 - začátek (min)"
+    id: w3_start_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:clock-start"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 3
+
+  - platform: template
+    name: "Okno 3 - konec (h)"
+    id: w3_end_h
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 22
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 4
+
+  - platform: template
+    name: "Okno 3 - konec (min)"
+    id: w3_end_m
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:clock-end"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 5
+
+  - platform: template
+    name: "Okno 3 - cílová teplota (°C)"
+    id: w3_temp
+    min_value: 20
+    max_value: 95
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 45.0
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 6
+
+  # Combined output 0.0–1.0
+  - platform: template
+    name: "Výkon (POWER OUT)"
+    id: total_power
+    min_value: 0.0
+    max_value: 1.0
+    step: 0.01
+    mode: slider
+    optimistic: true
+    initial_value: 0.0
+    icon: "mdi:lightning-bolt"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 4
+    on_value:
+      - lambda: |-
+          // Split 0–1 across three phases:
+          // 0.00–0.33: SSR only on L1, contactors off
+          // 0.33–0.67: contactor L2 on, SSR ramps on L1
+          // 0.67–1.00: contactors L2+L3 on, SSR ramps on L1
+          float per_phase = 1.0f / 3.0f;
+          float v = x;
+          float ssr_lvl = 0.0f;
+          if (v < per_phase) {
+            ssr_lvl = v / per_phase;
+            id(stykac1).turn_off();
+            id(stykac2).turn_off();
+          } else if (v < 2.0f * per_phase) {
+            ssr_lvl = (v - per_phase) / per_phase;
+            id(stykac1).turn_on();
+            id(stykac2).turn_off();
+          } else {
+            ssr_lvl = (v - 2.0f * per_phase) / per_phase;
+            id(stykac1).turn_on();
+            id(stykac2).turn_on();
+          }
+          id(ssr).set_level(ssr_lvl);
+
+# ────────────── SENSORS ──────────────
+sensor:
+  - platform: dallas_temp
+    address: 0x5a00001072aad528
+    name: "Teplota vody"
+    id: temp
+    update_interval: 5s
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 1
+
+  - platform: template
+    name: "Výkon sítě celkem (W)"
+    id: grid_power_sensor
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    update_interval: 2s
+    lambda: |-
+      return id(grid_power_total);
+    icon: "mdi:transmission-tower"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 2
+
+  - platform: template
+    name: "SOC baterie"
+    id: soc_sensor
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: |-
+      return id(soc_value_global);
+    icon: "mdi:battery"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 3
+
+  # Thermostat P output — useful for monitoring how hard thermostat is working
+  - platform: template
+    name: "Termostat výkon (%)"
+    id: thermostat_pct
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 2s
+    lambda: |-
+      return id(thermostat_output) * 100.0f;
+    icon: "mdi:thermometer-auto"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 5
+
+  - platform: template
+    name: "SSR úroveň"
+    unit_of_measurement: ""
+    update_interval: 1s
+    lambda: |-
+      return id(total_power).state;
+    icon: "mdi:sine-wave"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 6
+
+# ────────────── BINARY SENSORS ──────────────
+binary_sensor:
+  - platform: template
+    name: "Cerbo GX online"
+    id: cerbo_online_sensor
+    device_class: connectivity
+    lambda: |-
+      return id(cerbo_online);
+    icon: "mdi:lan-connect"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 7
+
+  - platform: template
+    name: "Termostat aktivní"
+    lambda: |-
+      return id(thermostat_output) > 0.01f;
+    icon: "mdi:clock-time-four"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 8
+
+  - platform: template
+    name: "Wattrouter aktivní"
+    lambda: |-
+      return id(wattrouter_output) > 0.01f;
+    icon: "mdi:solar-power"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 9
+
+# ────────────── SWITCHES ──────────────
+switch:
+  - platform: template
+    name: "Wattrouter zapnout"
+    id: wattrouter_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:solar-power"
+    turn_off_action:
+      - globals.set:
+          id: wattrouter_output
+          value: '0.0'
+    web_server:
+      sorting_group_id: group_wattrouter
+      sorting_weight: 0
+
+  - platform: template
+    name: "Termostat zapnout"
+    id: thermostat_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:thermometer-auto"
+    turn_off_action:
+      - globals.set:
+          id: thermostat_output
+          value: '0.0'
+    web_server:
+      sorting_group_id: group_thermostat
+      sorting_weight: 2
+
+  # Window 1 day-of-week checkboxes
+  - platform: template
+    name: "Okno 1 - pracovní dny"
+    id: w1_workdays
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    icon: "mdi:briefcase"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 0
+
+  - platform: template
+    name: "Okno 1 - víkend"
+    id: w1_weekend
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:sofa"
+    web_server:
+      sorting_group_id: group_window1
+      sorting_weight: 1
+
+  # Window 2 day-of-week checkboxes
+  - platform: template
+    name: "Okno 2 - pracovní dny"
+    id: w2_workdays
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    icon: "mdi:briefcase"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 0
+
+  - platform: template
+    name: "Okno 2 - víkend"
+    id: w2_weekend
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:sofa"
+    web_server:
+      sorting_group_id: group_window2
+      sorting_weight: 1
+
+  # Window 3 day-of-week checkboxes
+  - platform: template
+    name: "Okno 3 - pracovní dny"
+    id: w3_workdays
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    icon: "mdi:briefcase"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 0
+
+  - platform: template
+    name: "Okno 3 - víkend"
+    id: w3_weekend
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:sofa"
+    web_server:
+      sorting_group_id: group_window3
+      sorting_weight: 1
+
+  - platform: template
+    name: "Stykač L2"
+    optimistic: true
+    lambda: return id(stykac1).state;
+    icon: "mdi:power-plug"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 10
+
+  - platform: template
+    name: "Stykač L3"
+    optimistic: true
+    lambda: return id(stykac2).state;
+    icon: "mdi:power-plug"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 11
+
+  - platform: gpio
+    pin: GPIO13
+    name: "Contactor L2"
+    id: stykac1
+    internal: true
+
+  - platform: gpio
+    pin: GPIO14
+    name: "Contactor L3"
+    id: stykac2
+    internal: true
+
+# ────────────── TIME ──────────────
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "Europe/Prague"
+
+# ────────────── OUTPUT ──────────────
+output:
+  - platform: slow_pwm
+    pin: GPIO12
+    id: ssr
+    period: 103ms
+    zero_means_zero: true
+    inverted: false
+
+# ────────────── MAIN CONTROL LOOP ──────────────
+interval:
+  # Keepalive — publish every 30s or Cerbo stops sending MQTT data
+  - interval: 30s
+    then:
+      - mqtt.publish:
+          topic: "R/c0619ab36c7e/keepalive"
+          payload: ""
+
+  # Main regulation loop — every 2 seconds
+  - interval: 2s
+    then:
+      - lambda: |-
+          // ── Thermostat: P-controller with time windows ────────────────
+          // Returns true if hh:mm falls within [sh:sm, eh:em)
+          auto in_window = [](int h, int m, int sh, int sm, int eh, int em) -> bool {
+            int now_min   = h * 60 + m;
+            int start_min = sh * 60 + sm;
+            int end_min   = eh * 60 + em;
+            return (now_min >= start_min && now_min < end_min);
+          };
+
+          auto now = id(sntp_time).now();
+          float therm_out = 0.0f;
+
+          if (now.is_valid() && id(thermostat_enable).state) {
+            int cur_h  = now.hour;
+            int cur_m  = now.minute;
+            // day_of_week: 1=Sunday, 2=Monday ... 7=Saturday
+            bool is_weekend = (now.day_of_week == 1 || now.day_of_week == 7);
+            bool is_workday = !is_weekend;
+            float water_temp = id(temp).state;
+            float p_gain  = id(thermostat_p_gain).state;
+            float p_range = id(thermostat_p_range).state;
+
+            // Find which window is active and get its target temperature
+            float active_target = -1.0f;
+
+            bool w1_ok = (is_workday && id(w1_workdays).state)
+                      || (is_weekend && id(w1_weekend).state);
+            if (w1_ok && in_window(cur_h, cur_m,
+                   (int)id(w1_start_h).state, (int)id(w1_start_m).state,
+                   (int)id(w1_end_h).state,   (int)id(w1_end_m).state))
+              active_target = id(w1_temp).state;
+
+            bool w2_ok = (is_workday && id(w2_workdays).state)
+                      || (is_weekend && id(w2_weekend).state);
+            if (w2_ok && in_window(cur_h, cur_m,
+                   (int)id(w2_start_h).state, (int)id(w2_start_m).state,
+                   (int)id(w2_end_h).state,   (int)id(w2_end_m).state))
+              active_target = id(w2_temp).state;
+
+            bool w3_ok = (is_workday && id(w3_workdays).state)
+                      || (is_weekend && id(w3_weekend).state);
+            if (w3_ok && in_window(cur_h, cur_m,
+                   (int)id(w3_start_h).state, (int)id(w3_start_m).state,
+                   (int)id(w3_end_h).state,   (int)id(w3_end_m).state))
+              active_target = id(w3_temp).state;
+
+            if (active_target > 0.0f) {
+              // P-controller: error = how far below target we are
+              // error > 0 → below target → heat
+              // error <= 0 → at or above target → no heat
+              float error = active_target - water_temp;
+              if (error > 0.0f) {
+                // Normalize by range, scale by gain, clamp to 0–1
+                // At error=p_range → output=gain (clamped to 1.0)
+                // At error=0       → output=0
+                therm_out = std::min(1.0f, (error / p_range) * p_gain);
+              }
+              // error <= 0: temperature reached or exceeded target → output stays 0
+            }
+          }
+          id(thermostat_output) = therm_out;
+
+          // ── Wattrouter: P-controller ──────────────────────────────────
+          // Only runs when enabled AND Cerbo is online
+          if (id(wattrouter_enable).state && id(cerbo_online)) {
+            float grid_w    = id(grid_power_total);
+            float target_w  = id(wattrouter_target).state;
+            float gain      = id(wattrouter_p_gain).state;
+            float dead_band = id(wattrouter_dead_band).state;
+            float max_w     = id(boiler_max_power).state;
+            float cur_out   = id(total_power).state;
+
+            // error < 0: exporting more than target → * -1 → positive delta → increase power
+            // error > 0: exporting less than target → * -1 → negative delta → decrease power
+            float error = grid_w - target_w;
+
+            if (fabsf(error) > dead_band) {
+              float delta = (error / max_w) * gain * -1.0f;
+              float new_out = cur_out + delta;
+              new_out = std::max(0.0f, std::min(1.0f, new_out));
+              id(wattrouter_output) = new_out;
+            }
+            // Inside dead band → hold current output unchanged
+          } else {
+            id(wattrouter_output) = 0.0f;
+          }
+
+          // ── Combine: higher of wattrouter and thermostat wins ─────────
+          // Wattrouter uses surplus solar → thermostat tops up from grid if needed
+          float combined = std::max(id(wattrouter_output), id(thermostat_output));
+          id(total_power).publish_state(combined);
