@@ -1,6 +1,6 @@
-# SOLARBEAM EMS NG - verze 4
-# Změny: termostat přepracován z ON/OFF na P regulátor
-#        nové parametry: P gain termostatu, rozsah regulace (°C pod cílem = 100% výkon)
+# SOLARBEAM EMS NG - verze 9
+# Změny: termostat zjednodušen — odstraněno P zesílení, zůstalo jen "Pásmo regulace (°C)"
+#        výkon = clamp(error / pasmo, 0, 1) — gain pevně 1.0 v kódu
 
 esphome:
   name: esphome-web-ab7e4c
@@ -76,7 +76,6 @@ mqtt:
     then:
       - logger.log: "Cerbo GX MQTT: disconnected"
   on_message:
-    # Grid power L1 — negative = export to grid
     - topic: "N/c0619ab36c7e/system/0/Ac/Grid/L1/Power"
       then:
         - lambda: |-
@@ -88,7 +87,6 @@ mqtt:
             id(grid_power_total) = id(grid_l1_power) + id(grid_l2_power) + id(grid_l3_power);
             id(cerbo_online) = true;
 
-    # Grid power L2
     - topic: "N/c0619ab36c7e/system/0/Ac/Grid/L2/Power"
       then:
         - lambda: |-
@@ -99,7 +97,6 @@ mqtt:
               id(grid_l2_power) = (float)doc["value"].as<int>();
             id(grid_power_total) = id(grid_l1_power) + id(grid_l2_power) + id(grid_l3_power);
 
-    # Grid power L3
     - topic: "N/c0619ab36c7e/system/0/Ac/Grid/L3/Power"
       then:
         - lambda: |-
@@ -110,7 +107,6 @@ mqtt:
               id(grid_l3_power) = (float)doc["value"].as<int>();
             id(grid_power_total) = id(grid_l1_power) + id(grid_l2_power) + id(grid_l3_power);
 
-    # Battery SOC
     - topic: "N/c0619ab36c7e/system/0/Dc/Battery/Soc"
       then:
         - lambda: |-
@@ -146,6 +142,9 @@ globals:
   - id: thermostat_output
     type: float
     initial_value: '0.0'
+  - id: pi_integral
+    type: float
+    initial_value: '0.0'
 
 one_wire:
   - platform: gpio
@@ -158,7 +157,7 @@ number:
   - platform: template
     name: "Cílový výkon sítě (W)"
     id: wattrouter_target
-    min_value: -10000
+    min_value: -1000
     max_value: 0
     step: 50
     mode: box
@@ -174,30 +173,31 @@ number:
   - platform: template
     name: "P zesílení (wattrouter)"
     id: wattrouter_p_gain
-    min_value: 0.1
-    max_value: 10.0
-    step: 0.1
+    min_value: 0.01
+    max_value: 1.0
+    step: 0.01
     mode: box
     optimistic: true
     restore_value: true
-    initial_value: 1.0
+    initial_value: 0.20
     icon: "mdi:tune"
     web_server:
       sorting_group_id: group_wattrouter
       sorting_weight: 2
 
+  # I gain displayed as integer ×10⁻⁶ for GUI usability
+  # Actual Ki = displayed value / 1 000 000
   - platform: template
-    name: "Mrtvé pásmo (W)"
-    id: wattrouter_dead_band
-    min_value: 0
-    max_value: 500
-    step: 10
+    name: "I složka ×10⁻⁶ (wattrouter)"
+    id: wattrouter_i_gain
+    min_value: 1
+    max_value: 100
+    step: 1
     mode: box
     optimistic: true
     restore_value: true
-    initial_value: 100
-    unit_of_measurement: "W"
-    icon: "mdi:arrow-collapse-horizontal"
+    initial_value: 5
+    icon: "mdi:chart-timeline-variant"
     web_server:
       sorting_group_id: group_wattrouter
       sorting_weight: 3
@@ -218,41 +218,25 @@ number:
       sorting_group_id: group_wattrouter
       sorting_weight: 4
 
-  # ── Thermostat P-controller ──
-
-  # P gain for thermostat — scales how aggressively output responds to temperature error
+  # ── Thermostat ──
+  # Single parameter: temperature band below target at which boiler runs at 100%
+  # output = clamp(error / band, 0, 1)
+  # Example: band=8, target=55°C → at 47°C=100%, at 51°C=50%, at 55°C=0%
   - platform: template
-    name: "P zesílení (termostat)"
-    id: thermostat_p_gain
-    min_value: 0.1
-    max_value: 5.0
-    step: 0.1
-    mode: box
-    optimistic: true
-    restore_value: true
-    initial_value: 1.5
-    icon: "mdi:tune-variant"
-    web_server:
-      sorting_group_id: group_thermostat
-      sorting_weight: 0
-
-  # Temperature range below target at which boiler runs at 100% power
-  # e.g. range=10, target=60 → at 50°C power=100%, at 55°C power=50%, at 59°C power=10%
-  - platform: template
-    name: "Rozsah regulace (°C)"
-    id: thermostat_p_range
+    name: "Pásmo regulace (°C)"
+    id: thermostat_band
     min_value: 1.0
-    max_value: 30.0
+    max_value: 20.0
     step: 0.5
     mode: box
     optimistic: true
     restore_value: true
-    initial_value: 10.0
+    initial_value: 8.0
     unit_of_measurement: "°C"
     icon: "mdi:thermometer-lines"
     web_server:
       sorting_group_id: group_thermostat
-      sorting_weight: 1
+      sorting_weight: 0
 
   # ── Time window 1 ──
   - platform: template
@@ -485,7 +469,6 @@ number:
       sorting_group_id: group_window3
       sorting_weight: 6
 
-  # Combined output 0.0–1.0
   - platform: template
     name: "Výkon (POWER OUT)"
     id: total_power
@@ -501,10 +484,6 @@ number:
       sorting_weight: 4
     on_value:
       - lambda: |-
-          // Split 0–1 across three phases:
-          // 0.00–0.33: SSR only on L1, contactors off
-          // 0.33–0.67: contactor L2 on, SSR ramps on L1
-          // 0.67–1.00: contactors L2+L3 on, SSR ramps on L1
           float per_phase = 1.0f / 3.0f;
           float v = x;
           float ssr_lvl = 0.0f;
@@ -560,7 +539,19 @@ sensor:
       sorting_group_id: group_status
       sorting_weight: 3
 
-  # Thermostat P output — useful for monitoring how hard thermostat is working
+  - platform: template
+    name: "PI integrál"
+    id: pi_integral_sensor
+    unit_of_measurement: ""
+    accuracy_decimals: 3
+    update_interval: 2s
+    lambda: |-
+      return id(pi_integral);
+    icon: "mdi:sigma"
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 5
+
   - platform: template
     name: "Termostat výkon (%)"
     id: thermostat_pct
@@ -572,7 +563,7 @@ sensor:
     icon: "mdi:thermometer-auto"
     web_server:
       sorting_group_id: group_status
-      sorting_weight: 5
+      sorting_weight: 6
 
   - platform: template
     name: "SSR úroveň"
@@ -583,7 +574,7 @@ sensor:
     icon: "mdi:sine-wave"
     web_server:
       sorting_group_id: group_status
-      sorting_weight: 6
+      sorting_weight: 7
 
 # ────────────── BINARY SENSORS ──────────────
 binary_sensor:
@@ -596,7 +587,7 @@ binary_sensor:
     icon: "mdi:lan-connect"
     web_server:
       sorting_group_id: group_status
-      sorting_weight: 7
+      sorting_weight: 8
 
   - platform: template
     name: "Termostat aktivní"
@@ -605,7 +596,7 @@ binary_sensor:
     icon: "mdi:clock-time-four"
     web_server:
       sorting_group_id: group_status
-      sorting_weight: 8
+      sorting_weight: 9
 
   - platform: template
     name: "Wattrouter aktivní"
@@ -614,7 +605,7 @@ binary_sensor:
     icon: "mdi:solar-power"
     web_server:
       sorting_group_id: group_status
-      sorting_weight: 9
+      sorting_weight: 10
 
 # ────────────── SWITCHES ──────────────
 switch:
@@ -627,6 +618,9 @@ switch:
     turn_off_action:
       - globals.set:
           id: wattrouter_output
+          value: '0.0'
+      - globals.set:
+          id: pi_integral
           value: '0.0'
     web_server:
       sorting_group_id: group_wattrouter
@@ -644,9 +638,8 @@ switch:
           value: '0.0'
     web_server:
       sorting_group_id: group_thermostat
-      sorting_weight: 2
+      sorting_weight: 1
 
-  # Window 1 day-of-week checkboxes
   - platform: template
     name: "Okno 1 - pracovní dny"
     id: w1_workdays
@@ -667,7 +660,6 @@ switch:
       sorting_group_id: group_window1
       sorting_weight: 1
 
-  # Window 2 day-of-week checkboxes
   - platform: template
     name: "Okno 2 - pracovní dny"
     id: w2_workdays
@@ -688,7 +680,6 @@ switch:
       sorting_group_id: group_window2
       sorting_weight: 1
 
-  # Window 3 day-of-week checkboxes
   - platform: template
     name: "Okno 3 - pracovní dny"
     id: w3_workdays
@@ -716,7 +707,7 @@ switch:
     icon: "mdi:power-plug"
     web_server:
       sorting_group_id: group_status
-      sorting_weight: 10
+      sorting_weight: 11
 
   - platform: template
     name: "Stykač L3"
@@ -725,7 +716,7 @@ switch:
     icon: "mdi:power-plug"
     web_server:
       sorting_group_id: group_status
-      sorting_weight: 11
+      sorting_weight: 12
 
   - platform: gpio
     pin: GPIO13
@@ -747,28 +738,31 @@ time:
 
 # ────────────── OUTPUT ──────────────
 output:
+  # SSR on L1 — zero crossing, 100ms = exactly 5 mains cycles at 50Hz
   - platform: slow_pwm
     pin: GPIO12
     id: ssr
-    period: 103ms
+    period: 100ms
     zero_means_zero: true
     inverted: false
 
 # ────────────── MAIN CONTROL LOOP ──────────────
 interval:
-  # Keepalive — publish every 30s or Cerbo stops sending MQTT data
   - interval: 30s
     then:
       - mqtt.publish:
           topic: "R/c0619ab36c7e/keepalive"
           payload: ""
 
-  # Main regulation loop — every 2 seconds
   - interval: 2s
     then:
       - lambda: |-
-          // ── Thermostat: P-controller with time windows ────────────────
-          // Returns true if hh:mm falls within [sh:sm, eh:em)
+          const float dt = 2.0f;  // loop interval in seconds
+
+          // ── Thermostat: P-controller with single band parameter ────────
+          // output = clamp(error / band, 0, 1)
+          // band = temperature range below target at which boiler runs at 100%
+          // e.g. band=8, target=55°C: at 47°C→100%, at 51°C→50%, at 55°C→0%
           auto in_window = [](int h, int m, int sh, int sm, int eh, int em) -> bool {
             int now_min   = h * 60 + m;
             int start_min = sh * 60 + sm;
@@ -782,14 +776,11 @@ interval:
           if (now.is_valid() && id(thermostat_enable).state) {
             int cur_h  = now.hour;
             int cur_m  = now.minute;
-            // day_of_week: 1=Sunday, 2=Monday ... 7=Saturday
             bool is_weekend = (now.day_of_week == 1 || now.day_of_week == 7);
             bool is_workday = !is_weekend;
             float water_temp = id(temp).state;
-            float p_gain  = id(thermostat_p_gain).state;
-            float p_range = id(thermostat_p_range).state;
+            float band = id(thermostat_band).state;
 
-            // Find which window is active and get its target temperature
             float active_target = -1.0f;
 
             bool w1_ok = (is_workday && id(w1_workdays).state)
@@ -814,47 +805,48 @@ interval:
               active_target = id(w3_temp).state;
 
             if (active_target > 0.0f) {
-              // P-controller: error = how far below target we are
-              // error > 0 → below target → heat
-              // error <= 0 → at or above target → no heat
               float error = active_target - water_temp;
-              if (error > 0.0f) {
-                // Normalize by range, scale by gain, clamp to 0–1
-                // At error=p_range → output=gain (clamped to 1.0)
-                // At error=0       → output=0
-                therm_out = std::min(1.0f, (error / p_range) * p_gain);
-              }
-              // error <= 0: temperature reached or exceeded target → output stays 0
+              // P output: full power at band°C below target, zero at target and above
+              therm_out = std::max(0.0f, std::min(1.0f, error / band));
             }
           }
           id(thermostat_output) = therm_out;
 
-          // ── Wattrouter: P-controller ──────────────────────────────────
-          // Only runs when enabled AND Cerbo is online
+          // ── Wattrouter: PI-controller with anti-windup ────────────────
           if (id(wattrouter_enable).state && id(cerbo_online)) {
-            float grid_w    = id(grid_power_total);
-            float target_w  = id(wattrouter_target).state;
-            float gain      = id(wattrouter_p_gain).state;
-            float dead_band = id(wattrouter_dead_band).state;
-            float max_w     = id(boiler_max_power).state;
-            float cur_out   = id(total_power).state;
+            float grid_w   = id(grid_power_total);
+            float target_w = id(wattrouter_target).state;
+            float kp       = id(wattrouter_p_gain).state;
+            // I gain: GUI value ×10⁻⁶ → divide by 1000000 for actual Ki
+            float ki       = id(wattrouter_i_gain).state / 1000000.0f;
+            float max_w    = id(boiler_max_power).state;
+            float cur_out  = id(total_power).state;
 
-            // error < 0: exporting more than target → * -1 → positive delta → increase power
-            // error > 0: exporting less than target → * -1 → negative delta → decrease power
-            float error = grid_w - target_w;
+            // Normalize error: negative = exporting more than target → increase power
+            float error_norm = (grid_w - target_w) / max_w;
 
-            if (fabsf(error) > dead_band) {
-              float delta = (error / max_w) * gain * -1.0f;
-              float new_out = cur_out + delta;
-              new_out = std::max(0.0f, std::min(1.0f, new_out));
-              id(wattrouter_output) = new_out;
+            // Accumulate integral
+            id(pi_integral) += error_norm * dt;
+
+            // Compute raw PI output (sign inverted: more export → more power)
+            float raw_out = cur_out + (-error_norm * kp) + (-id(pi_integral) * ki);
+
+            // Clamp to valid range 0–1
+            float new_out = std::max(0.0f, std::min(1.0f, raw_out));
+
+            // Anti-windup: if output saturated, undo last integration step
+            if (new_out != raw_out) {
+              id(pi_integral) -= error_norm * dt;
             }
-            // Inside dead band → hold current output unchanged
+
+            id(wattrouter_output) = new_out;
+
           } else {
+            // Disabled or Cerbo offline — reset cleanly
             id(wattrouter_output) = 0.0f;
+            id(pi_integral) = 0.0f;
           }
 
           // ── Combine: higher of wattrouter and thermostat wins ─────────
-          // Wattrouter uses surplus solar → thermostat tops up from grid if needed
           float combined = std::max(id(wattrouter_output), id(thermostat_output));
           id(total_power).publish_state(combined);
