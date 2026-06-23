@@ -69,7 +69,7 @@ Using library PubSubClient at version 2.8 in folder: /home/dan/Arduino/libraries
 Using library Wire at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Wire 
 */
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20251102";
+const char* REV = "20260623";
 
 // USED
 const int HWidPin          = 34;  // analog
@@ -177,7 +177,7 @@ static bool eth_connected = false;
 // ETH.begin(ETH_ADDR, ETH_POWER, ETH_MDC, ETH_MDIO, ETH_TYPE, ETH_CLK);
 #define MAX_SRV_CLIENTS 1
 #define WDT_TIMEOUT 73
-#define EEPROM_SIZE 268   /*
+#define EEPROM_SIZE 270   /*
   0|Byte    1|128
   1|Char    1|A
   2|UChar   1|255
@@ -203,6 +203,7 @@ static bool eth_connected = false;
   236-245 - MQTT_USER
   246-265 - MQTT_PASS
   266 - Configuration
+  267-268 - TRX_PORT (TrxNet UDP port, uint16)
 
   !! Increment EEPROM_SIZE #define !! */
 
@@ -217,6 +218,7 @@ static bool eth_connected = false;
   DallasTemperature sensors1(&oneWire1);
   DallasTemperature sensors2(&oneWire2);
   DeviceAddress T1, T2;
+  void printAddress(DeviceAddress deviceAddress);   // forward declaration (Arduino auto-prototype fails here)
 #endif
 #include "esp_attr.h"
 #include <esp_task_wdt.h>
@@ -243,9 +245,46 @@ unsigned long restartTime = 0;
 IPAddress mqtt_server_ip(0, 0, 0, 0);
 #include <Wire.h>
 #include "time.h"
+
+// ---- TrxNet (Configuration==4 / 04-TrxNetSwitch) ----------------------------
+// P2P UDP control of the 8 FREE GPIO. Subscribes /s-gpio (1 byte = 8 outputs),
+// publishes /gpio (current output state). See /home/dan/Arduino/libraries/TrxNet.
+#include <TrxNet.h>
+WiFiUDP trxUdp;                       // WiFiUDP works over ESP32 Ethernet (shared lwIP)
+TrxNet  net(trxUdp);
+const int trxPins[8] = {0, 2, 4, 12, 13, 14, 32, 33};  // bit0..bit7 -> GPIO
+uint16_t TRX_PORT      = 5683;       // TrxNet UDP port (EEPROM 267), same on all peers
+char     trxName[TRXNET_MAX_DEVICE_NAME];
+bool     trxBegun      = false;
+uint8_t  trxState      = 0;          // last applied 8-bit output state
+volatile bool trxDirty = false;      // set in /s-gpio callback, drained in loop()
+// greet queue: peers that just joined, owed a current-state snapshot
+char     trxGreet[TRXNET_MAX_PEERS][TRXNET_MAX_DEVICE_NAME];
+uint8_t  trxGreetCount = 0;
+void onSGpio(const char* from, const uint8_t* data, size_t len);
+void onTrxPeer(const TrxPeer* peer);
 WiFiServer SerialServer;
 WiFiClient SerialServerClients[MAX_SRV_CLIENTS];
 //-------------------------------------------------------------------------------------------------------
+// forward declarations (Arduino auto-prototype generation fails in this IDE)
+uint32_t readADC_Cal(int ADC_Raw);
+void Watchdog();
+void CLI2();
+void Prn(int LN, String STR);
+void http();
+void EthEvent(WiFiEvent_t event);
+void Mqtt();
+bool mqttReconnect();
+void reSubscribe();
+void MqttRx(char *topic, byte *payload, unsigned int length);
+void AfterMQTTconnect();
+void MqttPubString(String TOPIC, String DATA, bool RETAIN);
+void TrxNetLoop();
+String UtcTime(int format);
+String Timestamp();
+void handleSet();
+uint32_t measureChargeTime(int ignoreThreshold, int threshold);
+float casNaKapacituProcentaExpon(unsigned long namerenyCas, unsigned long casProStoProcent, float odporOhm, int urovenPrahu, int rozsahADC);
 
 void setup() {
   Serial.begin(115200); //BaudRate
@@ -423,6 +462,14 @@ void setup() {
       Configuration=int(EEPROM.read(266));
     }
 
+  // 267-268 TRX_PORT (TrxNet UDP port)
+    if(EEPROM.read(267)==0xff){
+      TRX_PORT=5683;
+    }else{
+      TRX_PORT=EEPROM.readUShort(267);
+      if(TRX_PORT==0) TRX_PORT=5683;
+    }
+
 
   OutputWatchdog=EEPROM.readUInt(30);
   if(OutputWatchdog>10080){
@@ -527,8 +574,64 @@ void loop() {
   #endif
 
   // SPACE FOR YOUR CODE...
+  TrxNetLoop();
 
-  
+
+}
+
+//-------------------------------------------------------------------------------------------------------
+// TrxNet — 04-TrxNetSwitch: drive 8 FREE GPIO from /s-gpio, publish state on /gpio
+void TrxNetLoop(){
+  if(Configuration!=4) return;
+
+  // one-shot begin once Ethernet is up and NET_ID is set (empty NET_ID = disabled)
+  if(!trxBegun){
+    if(eth_connected && NET_ID.length()>0){
+      for(int i=0;i<8;i++) digitalWrite(trxPins[i], LOW);   // boot state: all LOW
+      trxState=0;
+      snprintf(trxName, sizeof(trxName), "DIN.%s", NET_ID.c_str());
+      net.setPort(TRX_PORT);
+      net.onPeerAdded(onTrxPeer);
+      net.subscribe("/s-gpio", onSGpio);
+      net.begin(trxName);
+      trxBegun=true;
+      Prn(1, "TrxNet begin "+String(trxName)+" port "+String(TRX_PORT));
+    }
+    return;
+  }
+
+  net.loop();
+
+  // publish current state on change (telemetry -> latest wins)
+  if(trxDirty){
+    trxDirty=false;
+    net.publish("/gpio", &trxState, 1, TRX_NON);
+  }
+
+  // greet one freshly-joined peer per iteration with current state (reliable)
+  if(trxGreetCount>0){
+    trxGreetCount--;
+    net.publishTo(trxGreet[trxGreetCount], "/gpio", &trxState, 1, TRX_CON);
+  }
+}
+
+// Incoming /s-gpio: 1 byte, bit i -> trxPins[i]. Runs inside net.loop(); keep short.
+void onSGpio(const char* from, const uint8_t* data, size_t len){
+  if(len < 1) return;
+  uint8_t b = data[0];
+  for(int i=0;i<8;i++){
+    digitalWrite(trxPins[i], (b >> i) & 1);
+  }
+  trxState = b;
+  trxDirty = true;     // defer /gpio publish to TrxNetLoop()
+}
+
+// New peer joined: queue for a current-state snapshot. Defer the send to loop().
+void onTrxPeer(const TrxPeer* peer){
+  if(trxGreetCount >= TRXNET_MAX_PEERS) return;
+  strncpy(trxGreet[trxGreetCount], peer->name, TRXNET_MAX_DEVICE_NAME-1);
+  trxGreet[trxGreetCount][TRXNET_MAX_DEVICE_NAME-1] = '\0';
+  trxGreetCount++;
 }
 
 // SUBROUTINES -------------------------------------------------------------------------------------------------------
@@ -1032,27 +1135,27 @@ void EthEvent(WiFiEvent_t event)
       Serial.println("Mbps");
       eth_connected = true;
 
+      // Load YOUR_CALL from EEPROM on cold start — independent of MQTT, so the
+      // setup field persists even when MQTT is disabled (e.g. TrxNetSwitch mode).
+      if (YOUR_CALL.isEmpty()){
+        if(EEPROM.read(141)==0xff){
+          YOUR_CALL=MACString;
+          YOUR_CALL.remove(0, 12);
+        }else{
+          for (int i=141; i<161; i++){
+            if(EEPROM.read(i)!=0xff){
+              YOUR_CALL=YOUR_CALL+char(EEPROM.read(i));
+            }
+          }
+        }
+      }
+
       #if defined(MQTT)
         if(MQTT_ENABLE == true){
           Serial.print("     EthEvent-mqtt ");
           mqttClient.setServer(mqtt_server_ip, MQTT_PORT);
           mqttClient.setCallback(MqttRx);
           lastMqttReconnectAttempt = 0;
-          // Check if this is a cold start
-          // If so then read in YOUR_CALL from EEPROM
-          if (YOUR_CALL.isEmpty()){
-            // EEPROM YOUR_CALL
-            if(EEPROM.read(141)==0xff){
-              YOUR_CALL=MACString;
-              YOUR_CALL.remove(0, 12);
-              }else{
-                for (int i=141; i<161; i++){
-                  if(EEPROM.read(i)!=0xff){
-                    YOUR_CALL=YOUR_CALL+char(EEPROM.read(i));
-                  }
-                }
-              }
-          }
 
           char charbuf[50];
            // // memcpy( charbuf, ETH.macAddress(), 6);
@@ -1313,6 +1416,7 @@ void handleSet() {
   String confSELECT1= "";
   String confSELECT2= "";
   String confSELECT3= "";
+  String confSELECT4= "";
 
   if ( ajaxserver.hasArg("yourcall") == false \
     && ajaxserver.hasArg("rotid") == false \
@@ -1333,7 +1437,7 @@ void handleSet() {
         YOUR_CALL = String(ajaxserver.arg("yourcall"));
 
         int str_len = str.length();
-        char char_array[str_len];
+        char char_array[str_len+1];
         str.toCharArray(char_array, str_len+1);
         for (int i=0; i<20; i++){
           if(i < str_len){
@@ -1358,7 +1462,7 @@ void handleSet() {
         NET_ID = String(ajaxserver.arg("rotid"));
 
         int str_len = str.length();
-        char char_array[str_len];
+        char char_array[str_len+1];
         str.toCharArray(char_array, str_len+1);
         for (int i=0; i<2; i++){
           if(i < str_len){
@@ -1387,7 +1491,7 @@ void handleSet() {
         MQTT_USER = String(ajaxserver.arg("mqttuser"));
 
         int str_len = str.length();
-        char char_array[str_len];
+        char char_array[str_len+1];
         str.toCharArray(char_array, str_len+1);
         for (int i=0; i<9; i++){
           if(i < str_len){
@@ -1416,7 +1520,7 @@ void handleSet() {
         MQTT_PASS = String(ajaxserver.arg("mqttpass"));
 
         int str_len = str.length();
-        char char_array[str_len];
+        char char_array[str_len+1];
         str.toCharArray(char_array, str_len+1);
         for (int i=0; i<19; i++){
           if(i < str_len){
@@ -1459,10 +1563,18 @@ void handleSet() {
         case 1: {Configuration= 1; break; }
         case 2: {Configuration= 2; break; }
         case 3: {Configuration= 3; break; }
+        case 4: {Configuration= 4; break; }
       }
       EEPROM.write(266, Configuration);
       MqttPubString("Configuration", String(Configuration), true);
       Serial.println("Configuration change to "+String(Configuration)+"...");
+    }
+
+    // 267-268 TRX_PORT (TrxNet UDP port)
+    if(ajaxserver.arg("trxport").length()>0 && ajaxserver.arg("trxport").toInt() != TRX_PORT){
+      TRX_PORT = ajaxserver.arg("trxport").toInt();
+      EEPROM.writeUShort(267, TRX_PORT);
+      Serial.println("TrxNet port change to "+String(TRX_PORT)+"...");
     }
 
     // 161-164 - MQTT broker IP
@@ -1597,6 +1709,7 @@ switch (Configuration) {
   case 1: {confSELECT1= " selected"; break; }
   case 2: {confSELECT2= " selected"; break; }
   case 3: {confSELECT3= " selected"; break; }
+  case 4: {confSELECT4= " selected"; break; }
 }
 
   String HtmlSrc = "<!DOCTYPE html><html><head><title>SETUP</title>\n";
@@ -1686,7 +1799,13 @@ switch (Configuration) {
   HtmlSrc += confSELECT2;
   HtmlSrc +=">02-C_measure</option><option value='3'";
   HtmlSrc += confSELECT3;
-  HtmlSrc +=">03-SB_version</option></select><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Version external module<br>Must restart after change</span></span></td></tr>\n";
+  HtmlSrc +=">03-SB_version</option><option value='4'";
+  HtmlSrc += confSELECT4;
+  HtmlSrc +=">04-TrxNetSwitch</option></select><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Version external module<br>Must restart after change</span></span></td></tr>\n";
+
+  if(Configuration==4){
+    HtmlSrc +="<tr><td class='tdr'><label for='trxport'>TrxNet UDP port:</label></td><td><input type='text' id='trxport' name='trxport' size='2' value='" + String(TRX_PORT) + "'><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 200px;'>Same port on all TrxNet peers. Use different ports to run separate networks. Default 5683</span></span></td></tr>\n";
+  }
 
   if(Configuration==1){
     for (int i=0; i<6; i++){
