@@ -69,7 +69,7 @@ Using library PubSubClient at version 2.8 in folder: /home/dan/Arduino/libraries
 Using library Wire at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Wire 
 */
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20260623";
+const char* REV = "20260707";
 
 // USED
 const int HWidPin          = 34;  // analog
@@ -177,7 +177,7 @@ static bool eth_connected = false;
 // ETH.begin(ETH_ADDR, ETH_POWER, ETH_MDC, ETH_MDIO, ETH_TYPE, ETH_CLK);
 #define MAX_SRV_CLIENTS 1
 #define WDT_TIMEOUT 73
-#define EEPROM_SIZE 270   /*
+#define EEPROM_SIZE 296   /*
   0|Byte    1|128
   1|Char    1|A
   2|UChar   1|255
@@ -204,6 +204,7 @@ static bool eth_connected = false;
   246-265 - MQTT_PASS
   266 - Configuration
   267-268 - TRX_PORT (TrxNet UDP port, uint16)
+  269-295 - TRX_PRIO (TrxNet priority prefixes, space-separated string, max 3x 8 chars)
 
   !! Increment EEPROM_SIZE #define !! */
 
@@ -254,6 +255,15 @@ WiFiUDP trxUdp;                       // WiFiUDP works over ESP32 Ethernet (shar
 TrxNet  net(trxUdp);
 const int trxPins[8] = {0, 2, 4, 12, 13, 14, 32, 33};  // bit0..bit7 -> GPIO
 uint16_t TRX_PORT      = 5683;       // TrxNet UDP port (EEPROM 267), same on all peers
+// Priority prefixes (EEPROM 269-295): up to 3 name-prefixes (<=8 chars) protected
+// from eviction when the peer table fills. See TrxNet::setPriorityPrefixes().
+#define  TRX_PRIO_MAX     3
+#define  TRX_PRIO_LEN     8          // max chars per prefix (excl. null)
+char     trxPrioStr[TRX_PRIO_MAX*(TRX_PRIO_LEN+1)];        // normalized, space-separated
+char     trxPrio[TRX_PRIO_MAX][TRX_PRIO_LEN+1];            // tokenized slots (stable)
+const char* trxPrioPtr[TRX_PRIO_MAX];                      // pointers into trxPrio[]
+uint8_t  trxPrioCount  = 0;
+void trxPrioParse(const char* src);  // fills trxPrio/trxPrioPtr/trxPrioStr/count
 char     trxName[TRXNET_MAX_DEVICE_NAME];
 bool     trxBegun      = false;
 uint8_t  trxState      = 0;          // last applied 8-bit output state
@@ -283,6 +293,7 @@ void TrxNetLoop();
 String UtcTime(int format);
 String Timestamp();
 void handleSet();
+void handleGpioState();
 uint32_t measureChargeTime(int ignoreThreshold, int threshold);
 float casNaKapacituProcentaExpon(unsigned long namerenyCas, unsigned long casProStoProcent, float odporOhm, int urovenPrahu, int rozsahADC);
 
@@ -470,6 +481,21 @@ void setup() {
       if(TRX_PORT==0) TRX_PORT=5683;
     }
 
+  // 269-295 TRX_PRIO (TrxNet priority prefixes, space-separated string)
+    if(EEPROM.read(269)==0xff){
+      trxPrioParse("ANT");             // factory default
+    }else{
+      char raw[TRX_PRIO_MAX*(TRX_PRIO_LEN+1)];
+      uint16_t i=0;
+      for(; i<sizeof(raw)-1; i++){
+        uint8_t c = EEPROM.read(269+i);
+        if(c==0xff || c==0) break;
+        raw[i]=char(c);
+      }
+      raw[i]='\0';
+      trxPrioParse(raw);
+    }
+
 
   OutputWatchdog=EEPROM.readUInt(30);
   if(OutputWatchdog>10080){
@@ -556,6 +582,7 @@ void setup() {
 
    // ajax
    ajaxserver.on("/set", handleSet);
+   ajaxserver.on("/gpiostate", handleGpioState);
    ajaxserver.begin();                  //Start server
    Serial.println("HTTP ajax server started");
 
@@ -580,6 +607,33 @@ void loop() {
 }
 
 //-------------------------------------------------------------------------------------------------------
+// Parse a space-separated prefix string into trxPrio[]/trxPrioPtr[], silently
+// clamping to TRX_PRIO_MAX tokens of TRX_PRIO_LEN chars each, and rebuild the
+// normalized trxPrioStr (collapsed whitespace) so stored == applied.
+void trxPrioParse(const char* src){
+  trxPrioCount = 0;
+  trxPrioStr[0] = '\0';
+  const char* p = src ? src : "";
+  while(*p && trxPrioCount < TRX_PRIO_MAX){
+    while(*p==' ') p++;                       // skip leading/duplicate spaces
+    if(!*p) break;
+    uint8_t n = 0;
+    char* dst = trxPrio[trxPrioCount];
+    while(*p && *p!=' '){
+      if(n < TRX_PRIO_LEN) dst[n++] = *p;     // clamp token length
+      p++;
+    }
+    dst[n] = '\0';
+    trxPrioPtr[trxPrioCount] = dst;
+    trxPrioCount++;
+  }
+  // rebuild normalized string
+  for(uint8_t i=0;i<trxPrioCount;i++){
+    if(i) strlcat(trxPrioStr, " ", sizeof(trxPrioStr));
+    strlcat(trxPrioStr, trxPrio[i], sizeof(trxPrioStr));
+  }
+}
+
 // TrxNet — 04-TrxNetSwitch: drive 8 FREE GPIO from /s-gpio, publish state on /gpio
 void TrxNetLoop(){
   if(Configuration!=4) return;
@@ -591,11 +645,12 @@ void TrxNetLoop(){
       trxState=0;
       snprintf(trxName, sizeof(trxName), "DIN.%s", NET_ID.c_str());
       net.setPort(TRX_PORT);
+      net.setPriorityPrefixes(trxPrioCount ? trxPrioPtr : nullptr, trxPrioCount);
       net.onPeerAdded(onTrxPeer);
       net.subscribe("/s-gpio", onSGpio);
       net.begin(trxName);
       trxBegun=true;
-      Prn(1, "TrxNet begin "+String(trxName)+" port "+String(TRX_PORT));
+      Prn(1, "TrxNet begin "+String(trxName)+" port "+String(TRX_PORT)+" prio "+String(trxPrioStr));
     }
     return;
   }
@@ -1392,6 +1447,15 @@ String Timestamp(){
 }
 
 //-------------------------------------------------------------------------------------------------------
+// Live GPIO state poll for the setup page (Configuration==4). Returns "state,voltage":
+//   state   = trxState (8-bit, bit i -> trxPins[i])
+//   voltage = GPI39 input voltage (pin reading * 4.3 for the 33k/10k divider)
+void handleGpioState() {
+  String out = String(trxState) + "," + String(VoltageGpi39 * 4.3, 1);
+  ajaxserver.send(200, "text/plain", out);
+}
+
+//-------------------------------------------------------------------------------------------------------
 // ajax rx
 void handleSet() {
 
@@ -1575,6 +1639,16 @@ void handleSet() {
       TRX_PORT = ajaxserver.arg("trxport").toInt();
       EEPROM.writeUShort(267, TRX_PORT);
       Serial.println("TrxNet port change to "+String(TRX_PORT)+"...");
+    }
+
+    // 269-295 TRX_PRIO (TrxNet priority prefixes) — only present when Configuration==4
+    if(ajaxserver.hasArg("trxprio")){
+      trxPrioParse(ajaxserver.arg("trxprio").c_str());   // normalize (clamp/collapse)
+      for(uint16_t i=0; i<TRX_PRIO_MAX*(TRX_PRIO_LEN+1); i++){
+        char c = (i < strlen(trxPrioStr)) ? trxPrioStr[i] : char(0xff);
+        EEPROM.write(269+i, c);
+      }
+      Serial.println("TrxNet priority prefixes change to \""+String(trxPrioStr)+"\"...");
     }
 
     // 161-164 - MQTT broker IP
@@ -1804,7 +1878,16 @@ switch (Configuration) {
   HtmlSrc +=">04-TrxNetSwitch</option></select><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Version external module<br>Must restart after change</span></span></td></tr>\n";
 
   if(Configuration==4){
+    // live GPIO state row (polled via /gpiostate): green = LOW/off, red = HIGH/on
+    const int gpioLabels[8]={0,2,4,12,13,14,32,33};
+    HtmlSrc +="<tr><td class='tdr'>GPIO state:</td><td class='tdl'>";
+    for(int i=0;i<8;i++){
+      HtmlSrc +="<span id='g"+String(i)+"' style='color:"+String((trxState>>i)&1?"#f00":"#0c0")+"'>GPIO"+String(gpioLabels[i])+"</span> | ";
+    }
+    HtmlSrc +="GPI39 <span id='v39'>"+String(VoltageGpi39*4.3,1)+"</span>V</td></tr>\n";
+    HtmlSrc +="<script>function gpioUpd(){var x=new XMLHttpRequest();x.onreadystatechange=function(){if(x.readyState==4&&x.status==200){var p=x.responseText.split(',');var s=parseInt(p[0]);for(var i=0;i<8;i++){document.getElementById('g'+i).style.color=(s&(1<<i))?'#f00':'#0c0';}document.getElementById('v39').textContent=p[1];}};x.open('GET','/gpiostate',true);x.send();}setInterval(gpioUpd,1000);</script>\n";
     HtmlSrc +="<tr><td class='tdr'><label for='trxport'>TrxNet UDP port:</label></td><td><input type='text' id='trxport' name='trxport' size='2' value='" + String(TRX_PORT) + "'><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 200px;'>Same port on all TrxNet peers. Use different ports to run separate networks. Default 5683</span></span></td></tr>\n";
+    HtmlSrc +="<tr><td class='tdr'><label for='trxprio'>TrxNet priority prefixes:</label></td><td><input type='text' id='trxprio' name='trxprio' size='26' value='" + String(trxPrioStr) + "'><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 200px;'>Space-separated device-name prefixes (max 3, 8 chars each) kept in the peer table when it fills up. Default: ANT</span></span></td></tr>\n";
   }
 
   if(Configuration==1){
