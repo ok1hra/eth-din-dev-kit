@@ -69,7 +69,7 @@ Using library PubSubClient at version 2.8 in folder: /home/dan/Arduino/libraries
 Using library Wire at version 2.0.0 in folder: /home/dan/Arduino/hardware/espressif/esp32/libraries/Wire 
 */
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20260707";
+const char* REV = "20261008";
 
 // USED
 const int HWidPin          = 34;  // analog
@@ -177,7 +177,7 @@ static bool eth_connected = false;
 // ETH.begin(ETH_ADDR, ETH_POWER, ETH_MDC, ETH_MDIO, ETH_TYPE, ETH_CLK);
 #define MAX_SRV_CLIENTS 1
 #define WDT_TIMEOUT 73
-#define EEPROM_SIZE 296   /*
+#define EEPROM_SIZE 369   /*
   0|Byte    1|128
   1|Char    1|A
   2|UChar   1|255
@@ -205,6 +205,10 @@ static bool eth_connected = false;
   266 - Configuration
   267-268 - TRX_PORT (TrxNet UDP port, uint16)
   269-295 - TRX_PRIO (TrxNet priority prefixes, space-separated string, max 3x 8 chars)
+  296-303 - TRX_MATRIX (SETUP-4 routing, row i = output mask driven by /s-gpio bit i)
+  304     - TRX_INV (SETUP-4 per-output inversion mask)
+  305-336 - TRX_SRC_PEER (SETUP-4 input source peer name, 0xff = ANY /s-gpio)
+  337-368 - TRX_SRC_PATH (SETUP-4 input source topic)
 
   !! Increment EEPROM_SIZE #define !! */
 
@@ -248,8 +252,8 @@ IPAddress mqtt_server_ip(0, 0, 0, 0);
 #include "time.h"
 
 // ---- TrxNet (Configuration==4 / 04-TrxNetSwitch) ----------------------------
-// P2P UDP control of the 8 FREE GPIO. Subscribes /s-gpio (1 byte = 8 outputs),
-// publishes /gpio (current output state). See /home/dan/Arduino/libraries/TrxNet.
+// P2P UDP control of the 8 FREE GPIO. Subscribes /s-gpio (1 byte = 8 input bits),
+// publishes /gpio (2 bytes: output state, applied input). See /home/dan/Arduino/libraries/TrxNet.
 #include <TrxNet.h>
 WiFiUDP trxUdp;                       // WiFiUDP works over ESP32 Ethernet (shared lwIP)
 TrxNet  net(trxUdp);
@@ -267,12 +271,43 @@ void trxPrioParse(const char* src);  // fills trxPrio/trxPrioPtr/trxPrioStr/coun
 char     trxName[TRXNET_MAX_DEVICE_NAME];
 bool     trxBegun      = false;
 uint8_t  trxState      = 0;          // last applied 8-bit output state
+uint8_t  trxStateIn    = 0;          // input byte trxState was computed from (after manual overrides)
 volatile bool trxDirty = false;      // set in /s-gpio callback, drained in loop()
 // greet queue: peers that just joined, owed a current-state snapshot
 char     trxGreet[TRXNET_MAX_PEERS][TRXNET_MAX_DEVICE_NAME];
 uint8_t  trxGreetCount = 0;
 void onSGpio(const char* from, const uint8_t* data, size_t len);
 void onTrxPeer(const TrxPeer* peer);
+// SETUP-4 routing matrix: out = (OR of trxMatrix[i] for every active input bit i) XOR trxInv.
+// Input = network /s-gpio byte with per-bit manual (web) overrides; a new /s-gpio clears them.
+uint8_t  trxMatrix[8];               // row i = output mask driven by input bit i (EEPROM 296-303)
+uint8_t  trxInv        = 0;          // per-output inversion mask (EEPROM 304)
+uint8_t  trxNetIn      = 0;          // last /s-gpio byte from network
+uint8_t  trxManMask    = 0;          // input bits under manual (web) override
+uint8_t  trxManVal     = 0;          // manual values for bits in trxManMask
+char     trxLastFrom[TRXNET_MAX_DEVICE_NAME] = "";  // last input source ("WEB" for setup-4)
+char     trxLastPath[TRXNET_MAX_TOPIC_LEN]   = "";  // topic of last input
+// Input source: one peer+topic (first payload byte = input bits). Empty peer = /s-gpio from ANY peer.
+char     trxSrcPeer[TRXNET_MAX_DEVICE_NAME]  = "";  // EEPROM 305-336
+char     trxSrcPath[TRXNET_MAX_TOPIC_LEN]    = "";  // EEPROM 337-368
+// Topics seen on the network (via onAnyTopic), for source selection on setup-4
+#define  TRX_SEEN_MAX  48
+struct TrxSeen {
+  char     from[TRXNET_MAX_DEVICE_NAME];   // empty = free slot
+  char     path[TRXNET_MAX_TOPIC_LEN];
+  uint8_t  data[4];                         // first payload bytes
+  uint8_t  len;                             // payload length (clamped to 255)
+  uint32_t ms;                              // millis() of last receive
+};
+TrxSeen  trxSeen[TRX_SEEN_MAX];
+void onTrxTopic(const char* from, const char* path, const uint8_t* data, size_t len);
+void trxInput(uint8_t b, const char* from, const char* path, bool command);
+void trxSrcSave();
+void trxPrioSave();
+void trxPrioAddSource(const char* peer);
+uint32_t trxLastMs     = 0;          // millis() of last input change
+void trxApply(bool force);
+void trxMatrixSave();
 WiFiServer SerialServer;
 WiFiClient SerialServerClients[MAX_SRV_CLIENTS];
 //-------------------------------------------------------------------------------------------------------
@@ -294,6 +329,9 @@ String UtcTime(int format);
 String Timestamp();
 void handleSet();
 void handleGpioState();
+void handleSetup4();
+void handleSetup4State();
+void handleSetup4Set();
 uint32_t measureChargeTime(int ignoreThreshold, int threshold);
 float casNaKapacituProcentaExpon(unsigned long namerenyCas, unsigned long casProStoProcent, float odporOhm, int urovenPrahu, int rozsahADC);
 
@@ -496,6 +534,27 @@ void setup() {
       trxPrioParse(raw);
     }
 
+  // 296-304 TRX_MATRIX + TRX_INV (SETUP-4), all 0xff = default 1:1 mapping, no inversion
+    {
+      bool blank=true;
+      for(int i=296; i<305; i++) if(EEPROM.read(i)!=0xff) blank=false;
+      for(int i=0; i<8; i++) trxMatrix[i] = blank ? (1<<i) : EEPROM.read(296+i);
+      trxInv = blank ? 0 : EEPROM.read(304);
+    }
+
+  // 305-336 TRX_SRC_PEER + 337-368 TRX_SRC_PATH (SETUP-4 input source), 0xff = ANY /s-gpio
+    for(int i=0; i<TRXNET_MAX_DEVICE_NAME-1; i++){
+      uint8_t c = EEPROM.read(305+i);
+      if(c==0xff || c==0) break;
+      trxSrcPeer[i]=char(c); trxSrcPeer[i+1]='\0';
+    }
+    for(int i=0; i<TRXNET_MAX_TOPIC_LEN-1; i++){
+      uint8_t c = EEPROM.read(337+i);
+      if(c==0xff || c==0) break;
+      trxSrcPath[i]=char(c); trxSrcPath[i+1]='\0';
+    }
+    if(!trxSrcPath[0]) trxSrcPeer[0]='\0';
+
 
   OutputWatchdog=EEPROM.readUInt(30);
   if(OutputWatchdog>10080){
@@ -583,6 +642,9 @@ void setup() {
    // ajax
    ajaxserver.on("/set", handleSet);
    ajaxserver.on("/gpiostate", handleGpioState);
+   ajaxserver.on("/setup4", handleSetup4);
+   ajaxserver.on("/setup4state", handleSetup4State);
+   ajaxserver.on("/setup4set", handleSetup4Set);
    ajaxserver.begin();                  //Start server
    Serial.println("HTTP ajax server started");
 
@@ -641,12 +703,13 @@ void TrxNetLoop(){
   // one-shot begin once Ethernet is up and NET_ID is set (empty NET_ID = disabled)
   if(!trxBegun){
     if(eth_connected && NET_ID.length()>0){
-      for(int i=0;i<8;i++) digitalWrite(trxPins[i], LOW);   // boot state: all LOW
-      trxState=0;
+      trxNetIn=0; trxManMask=0;                             // boot state: input 0 -> outputs = trxInv
+      trxApply(false);
       snprintf(trxName, sizeof(trxName), "DIN.%s", NET_ID.c_str());
       net.setPort(TRX_PORT);
       net.setPriorityPrefixes(trxPrioCount ? trxPrioPtr : nullptr, trxPrioCount);
       net.onPeerAdded(onTrxPeer);
+      net.onAnyTopic(onTrxTopic);
       net.subscribe("/s-gpio", onSGpio);
       net.begin(trxName);
       trxBegun=true;
@@ -658,27 +721,122 @@ void TrxNetLoop(){
   net.loop();
 
   // publish current state on change (telemetry -> latest wins)
+  // /gpio = [outputs, applied input]; byte 1 lets a controller confirm its /s-gpio
+  // even when the matrix maps it to different outputs
+  uint8_t gpioMsg[2] = { trxState, trxStateIn };
   if(trxDirty){
     trxDirty=false;
-    net.publish("/gpio", &trxState, 1, TRX_NON);
+    net.publish("/gpio", gpioMsg, 2, TRX_NON);
   }
 
   // greet one freshly-joined peer per iteration with current state (reliable)
   if(trxGreetCount>0){
     trxGreetCount--;
-    net.publishTo(trxGreet[trxGreetCount], "/gpio", &trxState, 1, TRX_CON);
+    net.publishTo(trxGreet[trxGreetCount], "/gpio", gpioMsg, 2, TRX_CON);
   }
 }
 
-// Incoming /s-gpio: 1 byte, bit i -> trxPins[i]. Runs inside net.loop(); keep short.
+// Incoming /s-gpio: 1 byte of input bits, routed to outputs via trxApply().
+// Runs inside net.loop(); keep short.
 void onSGpio(const char* from, const uint8_t* data, size_t len){
   if(len < 1) return;
-  uint8_t b = data[0];
-  for(int i=0;i<8;i++){
-    digitalWrite(trxPins[i], (b >> i) & 1);
+  if(trxSrcPeer[0]) return;   // a specific source is selected -> handled in onTrxTopic()
+  trxInput(data[0], (from && *from) ? from : "?", "/s-gpio", true);
+}
+
+// New input byte from the network. A command (/s-gpio) or a changed value cancels
+// manual overrides; a periodic telemetry topic repeating the same value does not.
+// A command always answers with /gpio, telemetry only when outputs change.
+void trxInput(uint8_t b, const char* from, const char* path, bool command){
+  if(command || b != trxNetIn) trxManMask = 0;
+  trxNetIn = b;
+  strlcpy(trxLastFrom, from, sizeof(trxLastFrom));
+  strlcpy(trxLastPath, path, sizeof(trxLastPath));
+  trxLastMs = millis();
+  trxApply(command);
+}
+
+// Every topic arriving from the network: remember it for setup-4 source selection,
+// and feed the selected source into the matrix. Runs inside net.loop(); keep short.
+void onTrxTopic(const char* from, const char* path, const uint8_t* data, size_t len){
+  if(!from || !*from) return;   // sender not in peer table yet: nothing to file it under
+  int hit=-1, empty=-1, oldest=-1;
+  uint32_t now = millis();
+  for(int i=0;i<TRX_SEEN_MAX;i++){
+    TrxSeen& t = trxSeen[i];
+    if(!t.from[0]){ if(empty<0) empty=i; continue; }
+    if(!strcmp(t.from, from) && !strcmp(t.path, path)){ hit=i; break; }
+    if(oldest<0 || now-t.ms > now-trxSeen[oldest].ms) oldest=i;
   }
-  trxState = b;
-  trxDirty = true;     // defer /gpio publish to TrxNetLoop()
+  int n = hit>=0 ? hit : (empty>=0 ? empty : oldest);
+  TrxSeen& t = trxSeen[n];
+  if(hit<0){
+    strlcpy(t.from, from, sizeof(t.from));
+    strlcpy(t.path, path, sizeof(t.path));
+  }
+  t.len = len>255 ? 255 : len;
+  memcpy(t.data, data, len<sizeof(t.data) ? len : sizeof(t.data));
+  t.ms = now;
+
+  if(trxSrcPeer[0] && len>=1 && !strcmp(from, trxSrcPeer) && !strcmp(path, trxSrcPath)){
+    trxInput(data[0], from, path, !strcmp(path, "/s-gpio"));
+  }
+}
+
+void trxPrioSave(){
+  for(uint16_t i=0; i<TRX_PRIO_MAX*(TRX_PRIO_LEN+1); i++){
+    EEPROM.write(269+i, (i < strlen(trxPrioStr)) ? trxPrioStr[i] : char(0xff));
+  }
+  EEPROM.commit();
+}
+
+// Put the type prefix of a selected source peer ("ANT.01" -> "ANT") first in the
+// priority prefixes, so the source is never evicted from the peer table. When all
+// slots are used the last one drops out. Applied live and saved.
+void trxPrioAddSource(const char* peer){
+  char pre[TRX_PRIO_LEN+1];
+  uint8_t n=0;
+  while(peer[n] && peer[n]!='.' && peer[n]!=' ' && n<TRX_PRIO_LEN){ pre[n]=peer[n]; n++; }
+  pre[n]='\0';
+  if(!n) return;
+  for(uint8_t i=0;i<trxPrioCount;i++) if(!strcmp(trxPrio[i], pre)) return;   // already there
+  char buf[sizeof(trxPrioStr)+TRX_PRIO_LEN+1];
+  snprintf(buf, sizeof(buf), "%s %s", pre, trxPrioStr);
+  trxPrioParse(buf);                       // keeps the first TRX_PRIO_MAX tokens
+  trxPrioSave();
+  if(trxBegun) net.setPriorityPrefixes(trxPrioCount ? trxPrioPtr : nullptr, trxPrioCount);
+  Prn(1, "TrxNet priority prefixes now "+String(trxPrioStr));
+}
+
+void trxSrcSave(){
+  for(int i=0;i<32;i++){
+    EEPROM.write(305+i, i<(int)strlen(trxSrcPeer) ? trxSrcPeer[i] : 0xff);
+    EEPROM.write(337+i, i<(int)strlen(trxSrcPath) ? trxSrcPath[i] : 0xff);
+  }
+  EEPROM.commit();
+}
+
+// Route current input through matrix + inversion to trxPins, store in trxState.
+// Marks /gpio for publish (deferred to TrxNetLoop()) on change or when forced.
+void trxApply(bool force){
+  uint8_t in  = (trxNetIn & ~trxManMask) | (trxManVal & trxManMask);
+  uint8_t out = 0;
+  for(int i=0;i<8;i++){
+    if((in >> i) & 1) out |= trxMatrix[i];
+  }
+  out ^= trxInv;
+  for(int i=0;i<8;i++){
+    digitalWrite(trxPins[i], (out >> i) & 1);
+  }
+  if(force || out != trxState || in != trxStateIn) trxDirty = true;
+  trxState   = out;
+  trxStateIn = in;
+}
+
+void trxMatrixSave(){
+  for(int i=0;i<8;i++) EEPROM.write(296+i, trxMatrix[i]);
+  EEPROM.write(304, trxInv);
+  EEPROM.commit();
 }
 
 // New peer joined: queue for a current-state snapshot. Defer the send to loop().
@@ -1456,6 +1614,229 @@ void handleGpioState() {
 }
 
 //-------------------------------------------------------------------------------------------------------
+// SETUP-4 (Configuration==4): input->output routing matrix + live debug page.
+// Static page; all state comes from /setup4state (JSON, polled every 500 ms).
+// Changes go through /setup4set, apply and save to EEPROM immediately.
+static const char SETUP4_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html><html><head><title>SETUP-4</title>
+<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+html,body{background:#333;color:#ccc;font-family:'Roboto Condensed',sans-serif,Arial,Tahoma,Verdana;margin:0;padding:8px}
+h1{color:#666;text-align:center;margin:8px 0}h1 span{font-size:50%}
+table{border-collapse:collapse;margin:0 auto}td,th{padding:4px 6px;text-align:center}
+th{color:#0c0;font-weight:normal;font-size:90%}.lbl{color:#0c0;text-align:right;padding-right:12px}
+.in{cursor:pointer;border-radius:5px;min-width:40px;font-weight:bold;user-select:none;border:1px solid #555}
+.on{color:#f00}.off{color:#0c0}.man{background:orange;color:#000}
+tr.act td.c{background:#444}.b{border-top:1px dotted #666}
+input[type=checkbox]{width:18px;height:18px;cursor:pointer;accent-color:orange}
+#dbg{margin-top:14px}#dbg td{text-align:left}#dbg td.lbl{text-align:right}
+#st{text-align:center;margin:6px;font-weight:bold}.note{color:#666;font-size:85%;text-align:center;margin-top:12px}
+</style></head><body>
+<h1>SETUP-4<br><span id='hd'>TrxNetSwitch</span></h1><div id='st'></div>
+<table id='mx'></table><table id='dbg'></table>
+<div class='note'>IN click = manual override (orange) with inverted value, click again = back to network value.<br>A command (/s-gpio) or a changed source value clears all overrides. Matrix and INV changes apply and save immediately.<br>Output = OR of checked rows of active IN bits, XOR INV.</div>
+<script>
+var lp=null,open={},G=['GPIO0','GPIO2','GPIO4','GPIO12','GPIO13','GPIO14','GPIO32','GPIO33'],S=null,busy=0,seq=0,setSeq=0;
+function $(i){return document.getElementById(i)}
+function hx(v){return '0x'+(v<16?'0':'')+v.toString(16).toUpperCase()}
+function bin(v){var r='';for(var i=7;i>=0;i--)r+=(v>>i)&1;return r}
+function build(){
+ var h='<tr><th></th><th>IN</th>';for(var j=0;j<8;j++)h+='<th>'+G[j]+'</th>';h+='</tr>';
+ for(var i=0;i<8;i++){
+  h+='<tr id="r'+i+'"><td class="lbl">bit'+i+'</td><td class="in" id="i'+i+'" onclick="man('+i+')"></td>';
+  for(var j=0;j<8;j++)h+='<td class="c"><input type="checkbox" id="m'+i+'_'+j+'" onchange="req(\'m='+i+'&o='+j+'&v=\'+(this.checked?1:0))"></td>';
+  h+='</tr>';
+ }
+ h+='<tr class="b"><td class="lbl">INV</td><td></td>';
+ for(var j=0;j<8;j++)h+='<td><input type="checkbox" id="v'+j+'" onchange="req(\'inv='+j+'&v=\'+(this.checked?1:0))"></td>';
+ h+='</tr><tr><td class="lbl">OUT</td><td></td>';for(var j=0;j<8;j++)h+='<td id="o'+j+'"></td>';
+ $('mx').innerHTML=h+'</tr>';
+}
+function row(l,v){var t=$('dbg').insertRow(-1),a=t.insertCell(0),b=t.insertCell(1);a.className='lbl';a.textContent=l;b.textContent=v;return t}
+function render(s){
+ S=s;$('hd').textContent=s.name+' | TrxNet port '+s.port;
+ $('st').textContent=s.run?'':'TrxNet not running (Device ID empty or Ethernet down)';$('st').style.color='orange';
+ for(var i=0;i<8;i++){
+  var b=(s.in>>i)&1,m=(s.mm>>i)&1,c=$('i'+i);
+  c.textContent=b;c.className='in '+(m?'man':(b?'on':'off'));c.title=m?'manual - click to release':'network - click for manual';
+  $('r'+i).className=b?'act':'';
+  for(var j=0;j<8;j++)$('m'+i+'_'+j).checked=(s.mx[i]>>j)&1;
+ }
+ for(var j=0;j<8;j++){var o=(s.out>>j)&1;$('v'+j).checked=(s.inv>>j)&1;$('o'+j).textContent=o;$('o'+j).className=o?'on':'off'}
+ var d=$('dbg');while(d.rows.length)d.deleteRow(0);
+ var r=row('Source:',s.src?(s.src+' '+s.stopic+(s.srcon?'':'  OFFLINE - holding last state')):'ANY /s-gpio (default)');
+ if(s.src&&!s.srcon)r.cells[1].style.color='#f00';
+ row('Last input:',s.from?(s.from+' '+s.lpath+' ('+s.age+' s ago)'):'none since boot');
+ row('Input:',hx(s.in)+' '+bin(s.in)+'  (network '+hx(s.net)+', manual mask '+hx(s.mm)+')');
+ row('Output (/gpio):',hx(s.out)+' '+bin(s.out));
+ row('GPI39:',s.v39+' V');
+ row('Priority prefixes:',s.prio||'none');
+ if(lp!==null&&s.prio!==lp)try{var f=window.opener&&window.opener.document.getElementById('trxprio');if(f)f.value=s.prio}catch(e){}
+ lp=s.prio;
+ row('Select source:','click peer = show topics, click topic = use as input, click again = back to ANY').className='b';
+ r=row('','ANY /s-gpio (default)');pick(r,!s.src,'src=');
+ for(var k=0;k<s.peers.length;k++){
+  var p=s.peers[k],o=open[p[0]];
+  r=row('',(o?'\u25BE ':'\u25B8 ')+p[0]+'  '+(p[2]<0?'offline':p[1]+'  ('+p[2]+' s)')+'  ['+p[3].length+' topics]'+(p[0]==s.src?'  \u25C0 source':''));
+  r.style.cursor='pointer';if(p[2]<0)r.style.color='#888';
+  r.onclick=(function(n){return function(){open[n]=!open[n];render(S)}})(p[0]);
+  if(!o)continue;
+  if(!p[3].length){row('','no topics seen yet').cells[1].style.paddingLeft='28px';continue}
+  for(var m=0;m<p[3].length;m++){
+   var t=p[3][m],on=(p[0]==s.src&&t[0]==s.stopic),v='';
+   for(var b=0;b<t[1].length;b++)v+=(b?' ':'')+hx(t[1][b]);
+   if(t[2]>t[1].length)v+=' \u2026';
+   r=row('',t[0]+'  '+(t[2]?v+'  ('+t[2]+' B)  bits '+bin(t[1][0])+'  ('+t[3]+' s)':'not seen yet'));
+   r.cells[1].style.paddingLeft='28px';
+   pick(r,on,on?'src=':'src='+encodeURIComponent(p[0])+'&topic='+encodeURIComponent(t[0]));
+  }
+ }
+}
+function pick(r,on,q){r.style.cursor='pointer';if(on)r.cells[1].className='man';r.onclick=function(){req(q)}}
+function req(q){
+ var x=new XMLHttpRequest(),my=++seq;if(q)setSeq=my;else busy=1;
+ x.timeout=2000;
+ x.onload=function(){if(!q)busy=0;if(x.status==200){if(my>=setSeq)render(JSON.parse(x.responseText))}else{$('st').textContent=x.responseText;$('st').style.color='#f00'}};
+ x.onerror=x.ontimeout=function(){if(!q)busy=0;$('st').textContent='OFFLINE';$('st').style.color='#f00';if(q&&S)render(S)};
+ x.open('GET',q?'/setup4set?'+q:'/setup4state',true);x.send();
+}
+function man(i){if(S)req('in='+i+'&man='+(((S.mm>>i)&1)?0:1))}
+build();req();setInterval(function(){if(!busy)req()},500);
+</script></body></html>)rawliteral";
+
+void handleSetup4() {
+  if(Configuration!=4){ ajaxserver.send(404, "text/plain", "Configuration is not 04-TrxNetSwitch"); return; }
+  ajaxserver.send_P(200, "text/html", SETUP4_HTML);
+}
+
+bool trxPeerActive(const char* name){
+  if(!trxBegun || !name[0]) return false;
+  for(int i=0;i<net.peerCount();i++){
+    const TrxPeer* p = net.peer(i);
+    if(p && !strcmp(p->name, name)) return true;
+  }
+  return false;
+}
+
+String jsonEsc(const char* s);
+
+// Seen topics of one peer as JSON: [[topic, [first bytes], len, age s], ...]
+String trxTopicsJson(const char* name){
+  String j = "[";
+  bool first = true;
+  for(int i=0;i<TRX_SEEN_MAX;i++){
+    const TrxSeen& t = trxSeen[i];
+    if(!t.from[0] || strcmp(t.from, name)) continue;
+    if(!first) j+=",";
+    first = false;
+    j += "[\"" + jsonEsc(t.path) + "\",[";
+    for(int b=0; b<t.len && b<(int)sizeof(t.data); b++){ if(b) j+=","; j+=String(t.data[b]); }
+    j += "]," + String(t.len) + "," + String((millis()-t.ms)/1000) + "]";
+  }
+  return j + "]";
+}
+
+String jsonEsc(const char* s){
+  String o;
+  for(; *s; s++){
+    if(*s=='"' || *s=='\\'){ o+='\\'; o+=*s; }
+    else if((uint8_t)*s < 0x20) o+=' ';
+    else o+=*s;
+  }
+  return o;
+}
+
+void handleSetup4State() {
+  if(Configuration!=4){ ajaxserver.send(404, "text/plain", "Configuration is not 04-TrxNetSwitch"); return; }
+  String j = "{\"name\":\"DIN." + jsonEsc(NET_ID.c_str()) + "\",\"port\":" + String(TRX_PORT) + ",\"run\":" + String(trxBegun ? 1 : 0);
+  j += ",\"net\":" + String(trxNetIn) + ",\"mm\":" + String(trxManMask);
+  j += ",\"in\":" + String((trxNetIn & ~trxManMask) | (trxManVal & trxManMask));
+  j += ",\"out\":" + String(trxState) + ",\"inv\":" + String(trxInv) + ",\"mx\":[";
+  for(int i=0;i<8;i++){ if(i) j+=","; j+=String(trxMatrix[i]); }
+  j += "],\"from\":\"" + jsonEsc(trxLastFrom) + "\",\"lpath\":\"" + jsonEsc(trxLastPath) + "\",\"age\":" + String((millis()-trxLastMs)/1000);
+  j += ",\"src\":\"" + jsonEsc(trxSrcPeer) + "\",\"stopic\":\"" + jsonEsc(trxSrcPath) + "\",\"srcon\":" + String(trxPeerActive(trxSrcPeer) ? 1 : 0);
+  j += ",\"prio\":\"" + jsonEsc(trxPrioStr) + "\"";
+  j += ",\"v39\":\"" + String(VoltageGpi39 * 4.3, 1) + "\",\"peers\":[";
+  // peers: [name, ip, age s (-1 = offline), [[topic, [first bytes], len, age s], ...]]
+  bool first = true;
+  if(trxBegun){
+    for(int i=0;i<net.peerCount();i++){
+      const TrxPeer* p = net.peer(i);
+      if(!p) break;
+      if(!first) j+=",";
+      first = false;
+      j += "[\"" + jsonEsc(p->name) + "\",\"" + p->ip.toString() + "\"," + String((millis()-p->lastSeen)/1000) + "," + trxTopicsJson(p->name) + "]";
+    }
+  }
+  // offline peers still holding seen topics, listed once each
+  for(int i=0;i<TRX_SEEN_MAX;i++){
+    const char* n = trxSeen[i].from;
+    if(!n[0] || trxPeerActive(n)) continue;
+    bool dup = false;
+    for(int k=0;k<i;k++) if(!strcmp(trxSeen[k].from, n)){ dup = true; break; }
+    if(dup) continue;
+    if(!first) j+=",";
+    first = false;
+    j += "[\"" + jsonEsc(n) + "\",\"\",-1," + trxTopicsJson(n) + "]";
+  }
+  // selected source not seen at all since boot: list it so it can be deselected
+  if(trxSrcPeer[0] && !trxPeerActive(trxSrcPeer)){
+    bool seen = false;
+    for(int i=0;i<TRX_SEEN_MAX;i++) if(!strcmp(trxSeen[i].from, trxSrcPeer)){ seen = true; break; }
+    if(!seen){
+      if(!first) j+=",";
+      j += "[\"" + jsonEsc(trxSrcPeer) + "\",\"\",-1,[[\"" + jsonEsc(trxSrcPath) + "\",[],0,-1]]]";
+    }
+  }
+  j += "]}";
+  ajaxserver.send(200, "application/json", j);
+}
+
+// m=row&o=col&v=0|1 matrix cell, inv=col&v=0|1 inversion, in=bit&man=0|1 manual override,
+// src=peer&topic=path input source (empty src = ANY /s-gpio).
+// Replies with the new state (same JSON as /setup4state).
+void handleSetup4Set() {
+  if(Configuration!=4){ ajaxserver.send(404, "text/plain", "Configuration is not 04-TrxNetSwitch"); return; }
+  int v = ajaxserver.arg("v").toInt() ? 1 : 0;
+  if(ajaxserver.hasArg("m") && ajaxserver.hasArg("o")){
+    int r = ajaxserver.arg("m").toInt(), c = ajaxserver.arg("o").toInt();
+    if(r>=0 && r<8 && c>=0 && c<8){ bitWrite(trxMatrix[r], c, v); trxMatrixSave(); }
+  }else if(ajaxserver.hasArg("inv")){
+    int c = ajaxserver.arg("inv").toInt();
+    if(c>=0 && c<8){ bitWrite(trxInv, c, v); trxMatrixSave(); }
+  }else if(ajaxserver.hasArg("in")){
+    int b = ajaxserver.arg("in").toInt();
+    if(b>=0 && b<8){
+      if(ajaxserver.arg("man").toInt()){
+        bitWrite(trxManVal, b, !((trxNetIn >> b) & 1));   // manual = inverted network value
+        trxManMask |= (1<<b);
+      }else{
+        trxManMask &= ~(1<<b);
+      }
+      strlcpy(trxLastFrom, "WEB", sizeof(trxLastFrom));
+      trxLastPath[0] = '\0';
+      trxLastMs = millis();
+    }
+  }else if(ajaxserver.hasArg("src")){
+    strlcpy(trxSrcPeer, ajaxserver.arg("src").c_str(), sizeof(trxSrcPeer));
+    strlcpy(trxSrcPath, ajaxserver.arg("topic").c_str(), sizeof(trxSrcPath));
+    if(!trxSrcPeer[0] || !trxSrcPath[0]){ trxSrcPeer[0]='\0'; trxSrcPath[0]='\0'; }
+    trxSrcSave();
+    if(trxSrcPeer[0]) trxPrioAddSource(trxSrcPeer);
+    // take the last seen value of the new source right away
+    for(int i=0;i<TRX_SEEN_MAX && trxSrcPeer[0];i++){
+      const TrxSeen& t = trxSeen[i];
+      if(t.len>=1 && !strcmp(t.from, trxSrcPeer) && !strcmp(t.path, trxSrcPath)){
+        trxInput(t.data[0], t.from, t.path, false);
+        trxLastMs = t.ms;
+        break;
+      }
+    }
+  }
+  trxApply(false);
+  handleSetup4State();
+}
+
+//-------------------------------------------------------------------------------------------------------
 // ajax rx
 void handleSet() {
 
@@ -1481,6 +1862,7 @@ void handleSet() {
   String confSELECT2= "";
   String confSELECT3= "";
   String confSELECT4= "";
+  bool formSubmitted = false;   // restart only after "Change & Restart", not on page view
 
   if ( ajaxserver.hasArg("yourcall") == false \
     && ajaxserver.hasArg("rotid") == false \
@@ -1488,6 +1870,7 @@ void handleSet() {
     // MqttPubString("Debug", "Form not valid", false);
   }else{
     // MqttPubString("Debug", "Form valid", false);
+    formSubmitted = true;
 
     // YOUR_CALL
     if ( ajaxserver.arg("yourcall").length()<1 || ajaxserver.arg("yourcall").length()>20){
@@ -1644,10 +2027,7 @@ void handleSet() {
     // 269-295 TRX_PRIO (TrxNet priority prefixes) — only present when Configuration==4
     if(ajaxserver.hasArg("trxprio")){
       trxPrioParse(ajaxserver.arg("trxprio").c_str());   // normalize (clamp/collapse)
-      for(uint16_t i=0; i<TRX_PRIO_MAX*(TRX_PRIO_LEN+1); i++){
-        char c = (i < strlen(trxPrioStr)) ? trxPrioStr[i] : char(0xff);
-        EEPROM.write(269+i, c);
-      }
+      trxPrioSave();
       Serial.println("TrxNet priority prefixes change to \""+String(trxPrioStr)+"\"...");
     }
 
@@ -1875,7 +2255,11 @@ switch (Configuration) {
   HtmlSrc += confSELECT3;
   HtmlSrc +=">03-SB_version</option><option value='4'";
   HtmlSrc += confSELECT4;
-  HtmlSrc +=">04-TrxNetSwitch</option></select><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Version external module<br>Must restart after change</span></span></td></tr>\n";
+  HtmlSrc +=">04-TrxNetSwitch</option></select><span class='hover-text'>?<span class='tooltip-text' id='top' style='width: 150px;'>Version external module<br>Must restart after change</span></span>";
+  if(Configuration==4){
+    HtmlSrc +="<button type='button' id='go' onclick=\"window.open('/setup4','setup4','width=680,height=950,left=40,top=0,menubar=no,location=no,status=no')\">SETUP-4</button>";
+  }
+  HtmlSrc +="</td></tr>\n";
 
   if(Configuration==4){
     // live GPIO state row (polled via /gpiostate): green = LOW/off, red = HIGH/on
@@ -1911,9 +2295,11 @@ switch (Configuration) {
 
   ajaxserver.send(200, "text/html", HtmlSrc); //Send web page
   // set restart after 3 second
-  shouldRestart = true;
-  restartTime = millis() + 3000;
-  Serial.println("Interface will be restarted...");
+  if(formSubmitted){
+    shouldRestart = true;
+    restartTime = millis() + 3000;
+    Serial.println("Interface will be restarted...");
+  }
 }
 
 // Capacity measurement
